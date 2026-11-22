@@ -197,8 +197,36 @@ function applyTags(t, g) {
   if (g.track) t.trackNo = parseInt(g.track) || t.trackNo;
   if (g.disc) t.disc = parseInt(g.disc) || 1;
   if (g.year) t.year = String(g.year).slice(0, 4);
+  if (g.genre) t.tagGenre = cleanGenre(g.genre);
   for (const k of ['duration', 'codec', 'bits', 'sampleRate', 'bitrate', 'vbr', 'channels']) if (g[k] != null) t[k] = g[k];
 }
+
+/* ---------- Géneros ---------- */
+const ID3_GENRES = ['Blues','Classic Rock','Country','Dance','Disco','Funk','Grunge','Hip-Hop','Jazz','Metal','New Age','Oldies','Other','Pop','R&B','Rap','Reggae','Rock','Techno','Industrial','Alternative','Ska','Death Metal','Pranks','Soundtrack','Euro-Techno','Ambient','Trip-Hop','Vocal','Jazz+Funk','Fusion','Trance','Classical','Instrumental','Acid','House','Game','Sound Clip','Gospel','Noise','Alternative Rock','Bass','Soul','Punk','Space','Meditative','Instrumental Pop','Instrumental Rock','Ethnic','Gothic','Darkwave','Techno-Industrial','Electronic','Pop-Folk','Eurodance','Dream','Southern Rock','Comedy','Cult','Gangsta','Top 40','Christian Rap','Pop/Funk','Jungle','Native American','Cabaret','New Wave','Psychedelic','Rave','Showtunes','Trailer','Lo-Fi','Tribal','Acid Punk','Acid Jazz','Polka','Retro','Musical','Rock & Roll','Hard Rock'];
+// Nombres en español y agrupación de variantes ("Hip Hop", "Hip-Hop/Rap", "rap" -> "Hip-Hop / Rap")
+const GENRE_ES = [
+  [/^(hip[- ]?hop|rap|hip[- ]?hop\/rap|trap|gangsta)$/, 'Hip-Hop / Rap'], [/^(latin|latino|latina|musica latina|música latina)$/, 'Latina'],
+  [/reggaet[oó]n|urbano latino|latin urban|dembow/, 'Urbano latino / Reggaetón'], [/^pop latino$|^latin pop$/, 'Pop latino'],
+  [/^(electronic|electronica|electrónica|electro|edm|dance|electronic\/dance|house|techno|trance|eurodance)$/, 'Electrónica'],
+  [/^(alternative|alternativa|alternative rock|indie|indie rock|alternativo)$/, 'Alternativa / Indie'], [/^(r&b|rnb|r&b\/soul|soul|r&b \/ soul)$/, 'R&B / Soul'],
+  [/^(classical|clasica|clásica|classic)$/, 'Clásica'], [/^(soundtrack|banda sonora|bandas sonoras|ost|score)$/, 'Bandas sonoras'],
+  [/^(singer\/songwriter|cantautor|cantautores)$/, 'Cantautor'], [/^(metal|heavy metal|death metal|hard rock & metal)$/, 'Metal'],
+  [/^(rock|classic rock|hard rock|rock & roll|rock and roll)$/, 'Rock'], [/^(pop|top 40|pop\/rock)$/, 'Pop'], [/^(jazz|acid jazz|jazz\+funk)$/, 'Jazz'],
+  [/^(salsa|salsa y tropical|tropical|cumbia|merengue|bachata)$/, 'Tropical'], [/^(regional mexicano|regional mexican|ranchera|corridos|banda|norteño|norteno)$/, 'Regional mexicano'],
+  [/^(children's music|infantil|kids)$/, 'Infantil'], [/^(christian|christian & gospel|gospel|cristiana)$/, 'Cristiana'], [/^(country)$/, 'Country'],
+  [/^(reggae|ska)$/, 'Reggae / Ska'], [/^(blues)$/, 'Blues'], [/^(folk|pop-folk)$/, 'Folk'], [/^(punk|acid punk)$/, 'Punk'], [/^(k-pop|kpop)$/, 'K-Pop'],
+];
+function cleanGenre(g) {
+  let s = String(g || '').trim(); if (!s) return '';
+  const m = s.match(/^\((\d+)\)/) || s.match(/^(\d+)$/); if (m) s = ID3_GENRES[+m[1]] || '';
+  s = s.split(/[;/,|]\s*(?=[A-Za-zÁÉÍÓÚáéíóú])/)[0].replace(/\(\d+\)/g, '').trim();
+  if (!s || /^(other|otro|unknown|desconocido|genre|género|misc)$/i.test(s)) return '';
+  const low = s.toLowerCase();
+  for (const [re, name] of GENRE_ES) if (re.test(low)) return name;
+  return s.replace(/\b\p{L}/gu, c => c.toUpperCase());
+}
+let onlineGenres = {}; // id de canción -> género encontrado en internet
+const decadeOf = y => { const n = parseInt(y); return n > 1900 && n < 2100 ? Math.floor(n / 10) * 10 : null; };
 
 function buildLibrary(allTracks) {
   const albums = new Map(), artists = new Map(), byId = new Map();
@@ -235,6 +263,14 @@ function buildLibrary(allTracks) {
   for (const al of albums.values()) al.tracks.sort((a, b) => (a.disc - b.disc) || (a.trackNo - b.trackNo) || a.title.localeCompare(b.title));
   for (const ar of artists.values()) { ar.tracks = [...ar.tracks]; ar.albums = [...ar.albums].map(k => albums.get(k)).sort((a, b) => (b.year || '').localeCompare(a.year || '')); }
   for (const [k, ar] of artists) if (!ar.tracks.length && !ar.albums.length) artists.delete(k);
+  // Listas automáticas por género y por década
+  const genres = new Map(), decades = new Map();
+  for (const t of tracks) {
+    t.genre = t.tagGenre || onlineGenres[t.id] || (t.variants || []).map(v => v.tagGenre || onlineGenres[v.id]).find(Boolean) || '';
+    if (t.genre) { const k = norm(t.genre); let g = genres.get(k); if (!g) genres.set(k, g = { key: k, name: t.genre, tracks: [] }); g.tracks.push(t); }
+    const d = decadeOf(t.year); if (d) { let x = decades.get(d); if (!x) decades.set(d, x = { key: String(d), name: d >= 2000 ? `Años ${d}` : `Años ${String(d).slice(2)}`, decade: d, tracks: [] }); x.tracks.push(t); }
+  }
+  L.genres = genres; L.decades = decades;
   L.tracks = tracks; L.all = allTracks; L.albums = albums; L.artists = artists; L.byId = byId; L.ready = true;
   if (P.queue.length) P.queue = P.queue.map(t => byId.get(t.id) || t);
 }
@@ -330,6 +366,7 @@ async function materialize(raw, readNew) {
   for (const t of tracks) { const c = cache.get(t.id); if (c && c.mod === t.mod) applyTags(t, c); else todo.push(t); }
   const covers = await idb.all('covers').catch(() => new Map());
   for (const [k, blob] of covers) setCover(k, blob);
+  onlineGenres = (await idb.get('kv', 'genres').catch(() => null)) || {};
   buildLibrary(tracks);
   rerender();
   if (readNew && todo.length) await enrich(todo, raw);
@@ -464,49 +501,66 @@ async function findArt({ artist, album, title }) {
       const s = simil(r[nameKey], want) * .6 + (ar ? simil(r.artistName, ar) * .4 : .25);
       if (s > bs) { bs = s; best = r; }
     }
-    return best && bs >= min ? best.artworkUrl100 : null;
+    return best && bs >= min ? { art: best.artworkUrl100, genre: cleanGenre(best.primaryGenreName) } : null;
   };
   if (album) {
-    const art = pick(await itunes({ term: `${ar} ${cleanQ(album)}`.trim(), entity: 'album' }), 'collectionName', album, .62);
-    if (art) return art;
+    const r = pick(await itunes({ term: `${ar} ${cleanQ(album)}`.trim(), entity: 'album' }), 'collectionName', album, .62);
+    if (r) return r;
   }
   if (title) {
-    const art = pick(await itunes({ term: `${ar} ${cleanQ(title)}`.trim(), entity: 'song' }), 'trackName', title, .66);
-    if (art) return art;
+    const r = pick(await itunes({ term: `${ar} ${cleanQ(title)}`.trim(), entity: 'song' }), 'trackName', title, .66);
+    if (r) return r;
   }
   return null;
 }
+// Busca en internet las carátulas y los géneros que faltan (un solo recorrido, sin saturar el servicio)
 async function onlineCovers() {
   if (coversRunning) { coversAgain = true; return; }
   if (!autoCoversOn() || !navigator.onLine || mode === 'demo' || !L.albums?.size) return;
   coversRunning = true; coversAgain = false;
   try {
     const misses = store.get('cvmiss', {}), now = Date.now(), WEEK = 7 * 864e5;
+    const noGenre = t => !t.tagGenre && !onlineGenres[t.id];
     const jobs = [];
     for (const al of L.albums.values()) {
       const tagged = al.tracks.some(t => t.tagAlbum);
-      if (tagged) { if (!coverURLs.has(al.key)) jobs.push({ key: al.key, album: al.title, artist: al.artist, title: al.tracks[0]?.title }); continue; }
-      if (coverURLs.has(al.key) && !/^sin álbum$/i.test(al.title)) continue; // carpeta con su propia imagen
-      for (const t of al.tracks) if (!coverURLs.has(t.coverKey)) jobs.push({ key: t.coverKey, artist: t.artist, title: t.title, albumKey: al.key });
+      if (tagged) {
+        const needCover = !coverURLs.has(al.key), needGenre = al.tracks.filter(noGenre);
+        if (needCover || needGenre.length) jobs.push({ key: needCover ? al.key : null, mk: 'a:' + al.key, album: al.title, artist: al.artist, title: al.tracks[0]?.title, ids: needGenre.map(t => t.id) });
+        continue;
+      }
+      const folderCover = coverURLs.has(al.key) && !/^sin álbum$/i.test(al.title);
+      for (const t of al.tracks) {
+        const needCover = !folderCover && !coverURLs.has(t.coverKey);
+        if (needCover || noGenre(t)) jobs.push({ key: needCover ? t.coverKey : null, mk: 't:' + t.id, artist: t.artist, title: t.title, albumKey: needCover ? al.key : null, ids: noGenre(t) ? [t.id] : [] });
+      }
     }
-    const todo = jobs.filter(j => !(misses[j.key] > now - WEEK));
-    let found = 0;
+    const todo = jobs.filter(j => !(misses[j.mk] > now - WEEK));
+    let found = 0, genresFound = 0;
     for (const [i, j] of todo.entries()) {
       if (!navigator.onLine || !autoCoversOn()) break;
-      if (todo.length > 2 && !scanning) setScan(`Buscando carátulas ${i + 1}/${todo.length}`);
+      if (todo.length > 2 && !scanning) setScan(`Buscando carátulas y géneros ${i + 1}/${todo.length}`);
       try {
-        const art = await findArt(j);
-        const blob = art ? await (await fetch(art.replace(/\/\d+x\d+(bb)?\.(jpg|png|webp)$/i, '/600x600bb.jpg'))).blob() : null;
-        if (blob && blob.size > 1000 && blob.type.startsWith('image/')) {
-          idb.set('covers', j.key, blob).catch(() => { }); setCover(j.key, blob); found++; delete misses[j.key];
-          if (j.albumKey && !coverURLs.has(j.albumKey)) { idb.set('covers', j.albumKey, blob).catch(() => { }); setCover(j.albumKey, blob); }
-        } else misses[j.key] = now;
-      } catch { misses[j.key] = now - WEEK + 864e5; } // fallo de red: reintentar mañana
+        const r = await findArt(j);
+        if (r && j.ids.length && r.genre) { for (const id of j.ids) onlineGenres[id] = r.genre; genresFound += j.ids.length; idb.set('kv', 'genres', onlineGenres).catch(() => { }); }
+        let ok = !j.key;
+        if (r && j.key && r.art) {
+          const blob = await (await fetch(r.art.replace(/\/\d+x\d+(bb)?\.(jpg|png|webp)$/i, '/600x600bb.jpg'))).blob();
+          if (blob.size > 1000 && blob.type.startsWith('image/')) {
+            ok = true; idb.set('covers', j.key, blob).catch(() => { }); setCover(j.key, blob); found++;
+            if (j.albumKey && !coverURLs.has(j.albumKey)) { idb.set('covers', j.albumKey, blob).catch(() => { }); setCover(j.albumKey, blob); }
+          }
+        }
+        if (r && ok && (!j.ids.length || r.genre)) delete misses[j.mk]; else misses[j.mk] = now;
+      } catch { misses[j.mk] = now - WEEK + 864e5; } // fallo de red: reintentar mañana
       store.set('cvmiss', misses);
+      if (genresFound && i % 10 === 9) { buildLibrary(L.all); rerender(true); }
       await sleep(900);
     }
     if (todo.length > 2 && !scanning) setScan('');
-    if (found) toast(found === 1 ? 'Se agregó 1 carátula automáticamente' : `Se agregaron ${found} carátulas automáticamente`);
+    if (genresFound) { buildLibrary(L.all); rerender(true); }
+    const msg = [found && `${found} carátula${found > 1 ? 's' : ''}`, genresFound && `${genresFound} género${genresFound > 1 ? 's' : ''}`].filter(Boolean).join(' y ');
+    if (msg) toast(`Se agregaron ${msg} automáticamente`);
   } finally { coversRunning = false; if (coversAgain) setTimeout(onlineCovers, 1000); }
 }
 window.addEventListener('online', () => setTimeout(onlineCovers, 3000));
@@ -829,7 +883,7 @@ async function updateNowPlaying() {
   $('#plQuality').textContent = qv.lossless ? (qv.hires ? 'HI-RES' : 'LOSSLESS') : (qv.qShort || '');
   $('#plQuality').title = qv.qLong || '';
   $('#fpQuality').textContent = (qv.hires ? 'HI-RES · ' : qv.lossless ? 'LOSSLESS · ' : '') + (qv.qLong || '') + (isDl(t) ? ' · DESCARGADA' : '');
-  $('#fpFrom').textContent = P.ctx.startsWith('album:') ? t.album : P.ctx.startsWith('artist:') ? t.artist : P.ctx === 'liked' ? 'Tus me gusta' : P.ctx.startsWith('playlist:') ? (playlists.find(p => 'playlist:' + p.id === P.ctx)?.name || 'Lista') : P.ctx === 'downloads' ? 'Descargas' : 'Tu biblioteca';
+  $('#fpFrom').textContent = P.ctx.startsWith('album:') ? t.album : P.ctx.startsWith('artist:') ? t.artist : P.ctx.startsWith('genre:') ? (L.genres?.get(P.ctx.slice(6))?.name || 'Género') : P.ctx.startsWith('decade:') ? (L.decades?.get(+P.ctx.slice(7))?.name || 'Década') : P.ctx === 'liked' ? 'Tus me gusta' : P.ctx.startsWith('playlist:') ? (playlists.find(p => 'playlist:' + p.id === P.ctx)?.name || 'Lista') : P.ctx === 'downloads' ? 'Descargas' : 'Tu biblioteca';
   updateLikeButtons(); updateMediaSession();
   if (LY.open && LY.track !== t) renderLyrics(t);
   document.title = `${t.title} · ${t.artist}`;
@@ -862,6 +916,8 @@ const DL = { queue: [], running: false, cur: null, pct: 0, done: 0, total: 0 };
 function ctxList(ctx) {
   if (ctx.startsWith('album:')) return L.albums.get(ctx.slice(6))?.tracks || [];
   if (ctx.startsWith('artist:')) return L.artists.get(ctx.slice(7))?.tracks || [];
+  if (ctx.startsWith('genre:')) return L.genres?.get(ctx.slice(6))?.tracks || [];
+  if (ctx.startsWith('decade:')) return L.decades?.get(+ctx.slice(7))?.tracks || [];
   if (ctx.startsWith('playlist:')) return plTracks(playlists.find(p => p.id === ctx.slice(9)));
   if (ctx.startsWith('track:')) return [L.byId.get(ctx.slice(6))].filter(Boolean);
   if (ctx === 'liked') return [...liked].map(id => L.byId.get(id)).filter(Boolean).reverse();
@@ -940,8 +996,8 @@ function plCover(pl, cls = '') {
   const h = hue(pl.id);
   return `<span class="cv ph ${cls}" style="background-image:linear-gradient(135deg,hsl(${h} 45% 35%),hsl(${(h + 60) % 360} 55% 18%))">${icon('playlist')}</span>`;
 }
-async function createPlaylist(withIds = []) {
-  const name = await askText('Nueva lista', 'Ponle un nombre a tu lista', `Mi lista n.º ${playlists.length + 1}`);
+async function createPlaylist(withIds = [], defName = '') {
+  const name = await askText('Nueva lista', 'Ponle un nombre a tu lista', defName || `Mi lista n.º ${playlists.length + 1}`);
   if (!name) return null;
   const pl = { id: Date.now().toString(36), name, ids: [...new Set(withIds)], created: Date.now() };
   playlists.unshift(pl); savePlaylists();
@@ -1219,6 +1275,20 @@ function trackRows(tracks, { album = false, covers = true, ctx = '' } = {}) {
     <div class="tr-head"><div class="n">#</div><div>Título</div><div class="h-alb">Álbum</div><div>Calidad</div><div class="t-dur">${icon('clock')}</div></div>${rows}</div>`;
 }
 const albumCard = al => `<div class="card" data-href="#/album/${enc(al.key)}"><div class="cv-wrap">${cv(al.key)}<button class="hover-play" data-play="album:${esc(al.key)}" aria-label="Reproducir">${icon('play')}</button></div><b>${esc(al.title)}</b><small>${esc(al.year ? al.year + ' • ' : '')}${esc(al.artist)}</small></div>`;
+const GENRE_COLORS = ['#e13300', '#1e3264', '#8400e7', '#e8115b', '#148a08', '#bc5900', '#477d95', '#dc148c', '#0d73ec', '#7358ff', '#a56752', '#27856a'];
+const genreColor = k => GENRE_COLORS[hue(k) % GENRE_COLORS.length];
+function smartCover(kind, key, cls = '') {
+  const c = genreColor(kind + key);
+  const list = kind === 'genre' ? L.genres?.get(key)?.tracks : L.decades?.get(+key)?.tracks;
+  const ck = (list || []).map(ckey).find(k => coverURLs.has(k));
+  const label = kind === 'genre' ? (L.genres?.get(key)?.name || '') : (L.decades?.get(+key)?.name || '');
+  return `<span class="cv smart ${cls}" style="background:${c}"><b>${esc(label)}</b>${ck ? `<i style="background-image:url(&quot;${coverURLs.get(ck)}&quot;)"></i>` : ''}</span>`;
+}
+const genreCard = g => `<div class="card" data-href="#/genre/${enc(g.key)}"><div class="cv-wrap">${smartCover('genre', g.key)}<button class="hover-play" data-play="genre:${esc(g.key)}" aria-label="Reproducir">${icon('play')}</button></div><b>${esc(g.name)}</b><small>Género • ${g.tracks.length} canciones</small></div>`;
+const decadeCard = d => `<div class="card" data-href="#/decade/${d.decade}"><div class="cv-wrap">${smartCover('decade', d.key)}<button class="hover-play" data-play="decade:${d.decade}" aria-label="Reproducir">${icon('play')}</button></div><b>${esc(d.name)}</b><small>${d.tracks.length} canciones</small></div>`;
+const sortedGenres = () => [...(L.genres?.values() || [])].sort((a, b) => b.tracks.length - a.tracks.length);
+const sortedDecades = () => [...(L.decades?.values() || [])].sort((a, b) => b.decade - a.decade);
+const artistMixCard = ar => `<div class="card" data-href="#/artist/${enc(ar.key)}"><div class="cv-wrap">${cv(artistCover(ar), '', 'person')}<button class="hover-play" data-play="artist:${esc(ar.key)}">${icon('play')}</button></div><b>Lo mejor de ${esc(ar.name)}</b><small>${ar.tracks.length} canciones</small></div>`;
 const artistCard = ar => `<div class="card" data-href="#/artist/${enc(ar.key)}"><div class="cv-wrap">${cv(artistCover(ar), 'circle', 'person')}<button class="hover-play" data-play="artist:${esc(ar.key)}" aria-label="Reproducir">${icon('play')}</button></div><b>${esc(ar.name)}</b><small>Artista</small></div>`;
 
 function emptyState(title, text, ic = 'note') { return `<div class="empty">${icon(ic)}<h2>${esc(title)}</h2><p>${esc(text)}</p></div>`; }
@@ -1253,6 +1323,9 @@ function renderHome() {
         ${lossless.length ? `<div class="card" data-play="lossless"><div class="cv-wrap"><span class="cv ph" style="background-image:linear-gradient(135deg,#f5c542,#a1287a)">${icon('note')}</span><button class="hover-play" data-play="lossless">${icon('play')}</button></div><b>Calidad sin pérdida</b><small>Solo FLAC, ALAC y WAV</small></div>` : ''}
         ${artists.slice(0, 6).map(ar => `<div class="card" data-play="artist:${esc(ar.key)}"><div class="cv-wrap">${cv(artistCover(ar), '', 'person')}<button class="hover-play" data-play="artist:${esc(ar.key)}">${icon('play')}</button></div><b>Radio de ${esc(ar.name)}</b><small>Todas sus canciones</small></div>`).join('')}
       </div></div>
+    ${sortedGenres().length ? `<div class="section"><div class="section-head"><h2>Listas por género</h2><a href="#/library/genres">Mostrar todo</a></div><div class="row">${sortedGenres().slice(0, 14).map(genreCard).join('')}</div></div>` : ''}
+    ${sortedArtists().filter(a => a.tracks.length >= 3).length ? `<div class="section"><div class="section-head"><h2>Listas por artista</h2><a href="#/library/artists">Mostrar todo</a></div><div class="row">${sortedArtists().filter(a => a.tracks.length >= 3).slice(0, 14).map(artistMixCard).join('')}</div></div>` : ''}
+    ${sortedDecades().length > 1 ? `<div class="section"><div class="section-head"><h2>Por década</h2><a href="#/library/genres">Mostrar todo</a></div><div class="row">${sortedDecades().map(decadeCard).join('')}</div></div>` : ''}
     ${playlists.length ? `<div class="section"><div class="section-head"><h2>Tus listas</h2><a href="#/library/playlists">Mostrar todo</a></div><div class="row">${playlists.slice(0, 14).map(playlistCard).join('')}</div></div>` : ''}
     ${dlAlbums.length ? `<div class="section"><div class="section-head"><h2>Disponible sin conexión</h2><a href="#/library/downloads">Mostrar todo</a></div><div class="row">${dlAlbums.map(albumCard).join('')}</div></div>` : ''}
     <div class="section"><div class="section-head"><h2>Agregados recientemente</h2><a href="#/library/albums">Mostrar todo</a></div>
@@ -1305,11 +1378,17 @@ function renderLibrary(tab) {
   tab = tab || store.get('libTab', 'playlists'); store.set('libTab', tab);
   setTitle('Tu biblioteca');
   const nDl = L.tracks.filter(isDl).length;
-  const chips = [['playlists', 'Listas'], ['albums', 'Álbumes'], ['artists', 'Artistas'], ['songs', 'Canciones'], ['downloads', `Descargas${nDl ? ' · ' + nDl : ''}`]]
+  const chips = [['playlists', 'Listas'], ['genres', 'Géneros'], ['albums', 'Álbumes'], ['artists', 'Artistas'], ['songs', 'Canciones'], ['downloads', `Descargas${nDl ? ' · ' + nDl : ''}`]]
     .map(([k, l]) => `<a class="chip ${tab === k ? 'on' : ''}" href="#/library/${k}">${l}</a>`).join('');
   let body, tools = '';
   if (!L.tracks.length) body = loadingOrEmpty();
-  else if (tab === 'artists') {
+  else if (tab === 'genres') {
+    const gs = sortedGenres(), ds = sortedDecades();
+    const missing = L.tracks.filter(t => !t.genre).length;
+    body = (gs.length ? `<div class="grid">${gs.map(genreCard).join('')}</div>` : emptyState('Aún no hay géneros', 'Sonora usa el género guardado en tus archivos y lo busca en internet para las canciones que no lo tienen. Aparecerán aquí en unos minutos.', 'note'))
+      + (missing && gs.length ? `<p class="muted small" style="margin:12px 0 0">${missing} canciones aún sin género${autoCoversOn() ? ' (buscando en internet…)' : ''}</p>` : '')
+      + (ds.length ? `<div class="section"><div class="section-head"><h2>Por década</h2></div><div class="grid">${ds.map(decadeCard).join('')}</div></div>` : '');
+  } else if (tab === 'artists') {
     const k = getSort('artists', 'count'); tools = sortSelect('artists', k, ARTIST_SORTS);
     body = `<div class="grid">${sortArtists([...L.artists.values()], k).map(artistCard).join('')}</div>`;
   } else if (tab === 'albums') {
@@ -1392,7 +1471,7 @@ function renderArtist(key) {
   return `<div>${headerBlock({ coverHTML: cv(ck, 'circle', 'person'), kind: 'Artista', title: ar.name, color, sub: `${ar.tracks.length} canciones • ${ar.albums.length} ${ar.albums.length === 1 ? 'álbum' : 'álbumes'}` })}
   <div class="body-grad" id="bodyGrad" style="background:linear-gradient(rgba(${color},.32),var(--panel) 260px)">
     <div class="actions"><button class="play-btn" data-play="artist:${esc(key)}" data-play-btn="artist:${esc(key)}">${icon('play')}</button>
-      <button class="icon-btn" data-shuffle="artist:${esc(key)}" aria-label="Aleatorio">${icon('shuffle')}</button>${dlButton('artist:' + key)}</div>
+      <button class="icon-btn" data-shuffle="artist:${esc(key)}" aria-label="Aleatorio">${icon('shuffle')}</button>${dlButton('artist:' + key)}<button class="btn ghost small-btn" data-save-list="artist:${esc(key)}">${icon('plus')} Guardar como lista</button></div>
     <div style="padding:0 24px"><div class="section-head"><h2>Canciones</h2></div></div>
     ${trackRows(songs.slice(0, 10), { ctx: 'artist:' + key })}
     <div class="page" style="padding-top:8px"><div class="section-head"><h2>Discografía</h2></div><div class="grid">${ar.albums.map(albumCard).join('')}</div></div>
@@ -1419,7 +1498,7 @@ async function tintHeader(key) {
 
 function setTitle(t) { $('#topTitle').textContent = t; }
 
-const VIEWS = { home: renderHome, search: renderSearch, library: renderLibrary, album: renderAlbum, artist: renderArtist, liked: renderLiked, playlist: renderPlaylist };
+const VIEWS = { genre: k => renderSmart('genre', k), decade: k => renderSmart('decade', k), home: renderHome, search: renderSearch, library: renderLibrary, album: renderAlbum, artist: renderArtist, liked: renderLiked, playlist: renderPlaylist };
 function parseRoute() {
   const [, name = 'home', ...rest] = (location.hash || '#/home').split('/');
   route.name = VIEWS[name] ? name : 'home';
@@ -1452,7 +1531,27 @@ function renderSidebar() {
 }
 
 /* ---------- Topbar al hacer scroll ---------- */
-function onScroll() { $('#topbar').classList.toggle('solid', view.scrollTop > 200 || (route.name !== 'album' && route.name !== 'artist' && route.name !== 'liked' && route.name !== 'playlist' && view.scrollTop > 40)); }
+function renderSmart(kind, key) {
+  const g = kind === 'genre' ? L.genres?.get(key) : L.decades?.get(+key);
+  if (!g) return `<div class="page">${L.ready ? emptyState('Lista no encontrada', '', 'playlist') : loadingOrEmpty()}</div>`;
+  setTitle(g.name);
+  const ctx = kind + ':' + (kind === 'genre' ? g.key : g.decade);
+  const c = genreColor(kind + (kind === 'genre' ? g.key : g.key));
+  const rgb = [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16));
+  const k = getSort('smart', 'artist');
+  const songs = sortTracks(g.tracks, k);
+  const ars = [...new Set(g.tracks.map(t => t.artistKey))].map(a => L.artists.get(a)).filter(Boolean).sort((a, b) => b.tracks.length - a.tracks.length).slice(0, 12);
+  const total = songs.reduce((s, t) => s + (t.duration || 0), 0);
+  return `<div>${headerBlock({ coverHTML: smartCover(kind, g.key), kind: kind === 'genre' ? 'Lista por género' : 'Lista por década', title: g.name, color: rgb, sub: `${songs.length} canciones${total ? ', ' + fmtLong(total) : ''} • se actualiza sola` })}
+  <div class="body-grad" id="bodyGrad" style="background:linear-gradient(rgba(${rgb},.32),var(--panel) 260px)">
+    <div class="actions"><button class="play-btn" data-play="${esc(ctx)}" data-play-btn="${esc(ctx)}">${icon('play')}</button>
+      ${dlButton(ctx)}<button class="btn ghost small-btn" data-save-list="${esc(ctx)}">${icon('plus')} Guardar como mi lista</button>
+      <span style="flex:1"></span>${sortSelect('smart', k, TRACK_SORTS, ['custom'])}</div>
+    ${trackRows(songs, { ctx })}
+    ${ars.length > 1 ? `<div class="page" style="padding-top:8px"><div class="section-head"><h2>Artistas</h2></div><div class="row">${ars.map(artistCard).join('')}</div></div>` : ''}
+  </div></div>`;
+}
+function onScroll() { $('#topbar').classList.toggle('solid', view.scrollTop > 200 || (route.name !== 'album' && route.name !== 'artist' && route.name !== 'liked' && route.name !== 'playlist' && route.name !== 'genre' && route.name !== 'decade' && view.scrollTop > 40)); }
 view.addEventListener('scroll', onScroll, { passive: true });
 
 /* =========================================================
@@ -1462,6 +1561,7 @@ function playContext(ctx, shuffleIt = false) {
   let list = [];
   if (ctx.startsWith('album:')) list = L.albums.get(ctx.slice(6))?.tracks || [];
   else if (ctx.startsWith('artist:')) list = L.artists.get(ctx.slice(7))?.tracks || [];
+  else if (ctx.startsWith('genre:') || ctx.startsWith('decade:')) list = shuffled(ctxList(ctx));
   else if (ctx === 'liked') list = sortTracks(ctxList('liked'), getSort('liked', 'custom'));
   else if (ctx.startsWith('playlist:')) list = sortTracks(ctxList(ctx), getSort('pl.' + ctx.slice(9), 'custom'));
   else if (ctx === 'downloads') list = sortTracks(ctxList(ctx), getSort('downloads', 'artist'));
@@ -1480,6 +1580,12 @@ document.addEventListener('click', e => {
   if (more) { e.stopPropagation(); const r = more.getBoundingClientRect(); return openTrackMenu(L.byId.get(more.dataset.more), r.left - 200, r.bottom + 4, more.closest('[data-ctx]')?.dataset.ctx || ''); }
   const dlb = e.target.closest('[data-dl]');
   if (dlb) { e.stopPropagation(); return toggleDownload(dlb.dataset.dl); }
+  const sv = e.target.closest('[data-save-list]');
+  if (sv) {
+    e.stopPropagation(); const ctx = sv.dataset.saveList; const ids = ctxList(ctx).map(t => t.id);
+    const name = ctx.startsWith('genre:') ? L.genres.get(ctx.slice(6))?.name : ctx.startsWith('decade:') ? L.decades.get(+ctx.slice(7))?.name : ctx.startsWith('artist:') ? 'Lo mejor de ' + (L.artists.get(ctx.slice(7))?.name || '') : '';
+    return createPlaylist(ids, name).then(pl => { if (pl) location.hash = '#/playlist/' + enc(pl.id); });
+  }
   if (e.target.closest('[data-new-playlist]')) { e.stopPropagation(); return createPlaylist().then(pl => { if (pl) location.hash = '#/playlist/' + enc(pl.id); }); }
   const ped = e.target.closest('[data-pl-edit]'); if (ped) return renamePlaylist(playlists.find(p => p.id === ped.dataset.plEdit));
   const pdel = e.target.closest('[data-pl-del]'); if (pdel) return deletePlaylist(playlists.find(p => p.id === pdel.dataset.plDel));

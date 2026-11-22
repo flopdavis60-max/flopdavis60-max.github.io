@@ -500,3 +500,10 @@ body.offline .scan-status{display:inline-block}
 .range-row{display:flex;align-items:center;gap:12px;margin:6px 0 4px}
 .range-row input{flex:1;accent-color:var(--accent)}
 .range-row b{min-width:36px;text-align:right}
+
+/* Portadas de listas automáticas (género / década) */
+.cv.smart{position:relative;overflow:hidden;display:block;background-image:none}
+.cv.smart b{white-space:normal;overflow:visible;text-overflow:clip;display:block;position:absolute;left:10%;top:9%;right:8%;font-size:clamp(14px,2.2vw,22px);line-height:1.1;font-weight:800;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,.25);z-index:1;word-break:break-word}
+.cv.smart i{position:absolute;width:58%;aspect-ratio:1;right:-9%;bottom:-6%;transform:rotate(22deg);background-size:cover;background-position:center;border-radius:6px;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+.hdr .cv.smart b{font-size:clamp(18px,3vw,30px)}
+.lib-item .cv.smart b,.quick-item .cv.smart b{font-size:11px}

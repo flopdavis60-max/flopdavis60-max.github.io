@@ -3,7 +3,7 @@
 // 2) Transmite el audio desde Google Drive en su calidad original: añade tu token a cada
 //    petición y deja pasar las peticiones "Range" para que puedas adelantar la canción sin descargarla completa.
 
-const VERSION = 'sonora-v4';
+const VERSION = 'sonora-v5';
 const AUDIO_CACHE = 'sonora-audio'; // descargas: nunca se borra al actualizar
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'icons.js', 'tags.js', 'demo.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
