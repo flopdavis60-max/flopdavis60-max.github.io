@@ -79,6 +79,8 @@
     </div>
     <div class="pl-right">
       <span class="quality" id="plQuality"></span>
+      <button class="icon-btn" id="btnDJ" aria-label="Modo DJ" title="Modo DJ: transiciones entre canciones"><i data-icon="dj"></i></button>
+      <button class="icon-btn" id="btnLyrics" aria-label="Letra" title="Letra"><i data-icon="mic"></i></button>
       <button class="icon-btn" id="btnQueue" aria-label="Cola"><i data-icon="queue"></i></button>
       <button class="icon-btn" id="btnMute" aria-label="Silenciar"><i data-icon="volume"></i></button>
       <div class="slider vol" id="vol"><div class="slider-fill"></div><div class="slider-knob"></div></div>
@@ -119,8 +121,22 @@
         <button class="icon-btn big" id="fpNext" aria-label="Siguiente"><i data-icon="next"></i></button>
         <button class="icon-btn" id="fpRepeat" aria-label="Repetir"><i data-icon="repeat"></i></button>
       </div>
+      <div class="fp-extra">
+        <button class="pill" id="fpLyrics"><i data-icon="mic"></i> Letra</button>
+        <button class="pill" id="fpDJ"><i data-icon="dj"></i> Modo DJ</button>
+      </div>
       <div class="fp-quality" id="fpQuality"></div>
     </div>
+  </section>
+
+  <!-- Letras -->
+  <section class="lyrics" id="lyrics" aria-hidden="true">
+    <div class="ly-head">
+      <button class="icon-btn" id="lyClose" aria-label="Cerrar letra"><i data-icon="chevronDown"></i></button>
+      <div class="ly-meta"><b id="lyTitle"></b><small id="lyArtist"></small></div>
+      <span class="ly-space"></span>
+    </div>
+    <div class="ly-body" id="lyricsBody"></div>
   </section>
 
   <!-- Cola -->
@@ -160,6 +176,12 @@
         </select>
         <small id="setDlInfo"></small>
       </label>
+      <div class="field">
+        <span>Modo DJ</span>
+        <label class="check"><input type="checkbox" id="setDJ"> Transiciones suaves entre canciones (crossfade)</label>
+        <div class="range-row"><input type="range" id="setDJFade" min="1" max="12" step="1"><b id="setDJFadeVal">6 s</b></div>
+        <label class="check"><input type="checkbox" id="setDJEndless"> Mezcla automática: al terminar la lista, seguir con canciones parecidas</label>
+      </div>
       <div class="modal-actions">
         <button class="btn" id="setRescan"><i data-icon="refresh"></i> Volver a escanear</button>
         <button class="btn ghost" id="setClearDl"><i data-icon="trash"></i> Borrar descargas</button>
@@ -212,6 +234,7 @@
 </div>
 
 <audio id="audio" preload="auto"></audio>
+<audio id="audio2" preload="auto"></audio>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script type="module" src="app.js"></script>
 </body>

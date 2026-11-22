@@ -331,15 +331,16 @@ async function scanDrive() {
   try {
     setScan('Buscando tu música en Drive…'); updateScanBtn();
     const rule = folderRule();
-    const [folders, audio, images] = rule.id ? await scanFolderTree(rule.id) : await Promise.all([
+    const [folders, audio, images, lrc = []] = rule.id ? await scanFolderTree(rule.id) : await Promise.all([
       listAll("mimeType='application/vnd.google-apps.folder' and trashed=false", 'id,name,parents'),
       listAll("trashed=false and (mimeType contains 'audio/' or name contains '.flac' or name contains '.m4a' or name contains '.opus')", 'id,name,mimeType,size,parents,modifiedTime,fileExtension'),
       listAll("trashed=false and mimeType contains 'image/' and (name contains 'cover' or name contains 'folder' or name contains 'front' or name contains 'portada' or name contains 'album')", 'id,name,parents'),
+      listAll("trashed=false and name contains '.lrc'", 'id,name,parents'),
     ]);
     const raw = {
       folders,
       audio: audio.filter(f => AUDIO_EXT.has((f.fileExtension || f.name.split('.').pop() || '').toLowerCase())),
-      images, at: Date.now(),
+      images, lrc: lrc.filter(f => /\.lrc$/i.test(f.name)), at: Date.now(),
     };
     await idb.set('kv', LIB_KEY, raw).catch(() => { });
     await materialize(raw, true);
@@ -355,7 +356,7 @@ async function scanDrive() {
 // Recorre solo la carpeta elegida y sus subcarpetas (funciona también con carpetas que otra persona compartió contigo)
 async function scanFolderTree(rootId) {
   const root = await (await gfetch(`${API}/${rootId}?fields=id,name&supportsAllDrives=true`)).json();
-  const folders = [{ id: root.id, name: root.name }], audio = [], images = [];
+  const folders = [{ id: root.id, name: root.name }], audio = [], images = [], lrc = [];
   let pending = [root.id];
   while (pending.length) {
     const batch = pending.splice(0, 25);
@@ -364,11 +365,12 @@ async function scanFolderTree(rootId) {
     for (const f of files) {
       if (f.mimeType === 'application/vnd.google-apps.folder') { folders.push(f); pending.push(f.id); }
       else if (f.mimeType?.startsWith('image/')) images.push(f);
+      else if (/\.lrc$/i.test(f.name)) lrc.push(f);
       else audio.push(f);
     }
     setScan(`Buscando tu música… ${audio.length} archivos`);
   }
-  return [folders, audio, images];
+  return [folders, audio, images, lrc];
 }
 function updateScanBtn() { $('#btnScan')?.classList.toggle('spin', scanning); }
 async function manualScan() {
@@ -388,7 +390,7 @@ async function enrich(todo, raw) {
       try {
         const g = await readTags({ size: t.size, ext: t.ext, fetchRange: (a, b) => fetchRange(t.id, a, b) });
         const pic = g.picture; delete g.picture;
-        const rec = { ...g, mod: t.mod };
+        const rec = { ...g, mod: t.mod, lyrChecked: true };
         applyTags(t, rec);
         if (pic) {
           const aa = t.albumArtist || t.artist; const key = norm(aa) + '|' + norm(t.album);
@@ -422,8 +424,13 @@ async function folderCovers(raw) {
 /* =========================================================
    Reproductor
    ========================================================= */
-const audio = $('#audio');
-const P = { queue: [], order: [], pos: -1, shuffle: store.get('shuffle', false), repeat: store.get('repeat', 'off'), ctx: '', cur: null, needsLoad: false, resumeAt: 0 };
+// Dos reproductores: el activo suena; el otro se usa para las transiciones del modo DJ
+const audios = [$('#audio'), $('#audio2')];
+let audio = audios[0];
+const otherAudio = () => audios[0] === audio ? audios[1] : audios[0];
+const P = { queue: [], order: [], pos: -1, shuffle: store.get('shuffle', false), repeat: store.get('repeat', 'off'), ctx: '', cur: null, needsLoad: false, resumeAt: 0, waitNet: false };
+const DJ = { on: store.get('dj', false), fade: store.get('djFade', 6), endless: store.get('djEndless', true), mixing: false, timer: 0, t0: 0, dur: 0, from: null, to: null };
+const userVol = () => store.get('vol', 0.8);
 
 function buildOrder(start) {
   const idx = P.queue.map((_, i) => i);
@@ -441,41 +448,64 @@ function playList(list, start = 0, ctx = '') {
   loadCurrent(true);
 }
 
+// Devuelve la fuente de audio de una canción: descargada (sin internet) o en streaming desde Drive
+async function srcFor(t) {
+  const v = t.demo ? t : (dlVariant(t) || variantFor(t, settings.quality));
+  let src;
+  if (t.demo) src = await renderDemoAudio(t);
+  else if (downloaded.has(v.id)) {
+    await swReady;
+    if (navigator.serviceWorker?.controller) src = `stream/${v.id}`;
+    else { const r = await (await caches.open(AUDIO_CACHE)).match(streamUrl(v.id)); src = URL.createObjectURL(await r.blob()); }
+  } else {
+    if (!navigator.onLine) throw new Error('offline');
+    if (!auth.valid()) await auth.request('');
+    await swReady;
+    if (navigator.serviceWorker?.controller) { swPost({ type: 'token', token: auth.token }); src = `stream/${v.id}`; }
+    else src = URL.createObjectURL(await (await gfetch(`${API}/${v.id}?alt=media&supportsAllDrives=true`)).blob());
+  }
+  return { src, v };
+}
+function setSrc(el, src, demo) {
+  if (el.dataset.blob) { URL.revokeObjectURL(el.dataset.blob); delete el.dataset.blob; }
+  if (src.startsWith('blob:') && !demo) el.dataset.blob = src;
+  el.src = src;
+}
+function cancelMix() {
+  clearTimeout(DJ.timer); DJ.seq = (DJ.seq || 0) + 1; DJ.from = DJ.to = null;
+  if (DJ.mixing) { const o = otherAudio(); o.pause(); o.removeAttribute('src'); o.load(); }
+  DJ.mixing = false; audios.forEach(a => { a.volume = userVol(); });
+}
+
 async function loadCurrent(autoplay, at = 0, hops = 0) {
   const t = P.queue[P.order[P.pos]]; if (!t) return;
+  cancelMix();
   // Sin internet: salta a la siguiente canción descargada
   if (!t.demo && !navigator.onLine && !isDl(t)) {
     for (let k = P.pos + 1; k < P.order.length; k++) if (isDl(P.queue[P.order[k]])) { P.pos = k; return loadCurrent(autoplay, 0, hops + 1); }
-    toast('Sin conexión: esta canción no está descargada.');
-    if (!hops) return;
+    P.cur = t; P.needsLoad = true; P.resumeAt = at; P.waitNet = autoplay;
+    updateNowPlaying(); markPlaying();
+    toast('Sin conexión: esta canción no está descargada. Sonará cuando vuelva el internet.');
+    return;
   }
-  const v = t.demo ? t : (dlVariant(t) || variantFor(t, settings.quality));
-  P.cur = t; P.playing = v; P.needsLoad = false;
+  P.cur = t; P.needsLoad = false; P.waitNet = false;
+  P.playing = t.demo ? t : (dlVariant(t) || variantFor(t, settings.quality));
   updateNowPlaying(); markPlaying(); renderQueue(); saveSession();
   if (P.ctx.startsWith('album:')) pushRecent(P.ctx.slice(6));
   try {
-    let src;
-    if (t.demo) src = await renderDemoAudio(t);
-    else if (downloaded.has(v.id)) {
-      await swReady;
-      if (navigator.serviceWorker?.controller) src = `stream/${v.id}`;
-      else { const r = await (await caches.open(AUDIO_CACHE)).match(streamUrl(v.id)); src = URL.createObjectURL(await r.blob()); }
-    } else {
-      if (!auth.valid()) { try { await auth.request(''); } catch { P.needsLoad = true; askReconnect('Conéctate a Google para reproducir.'); return; } }
-      await swReady;
-      if (navigator.serviceWorker?.controller) { swPost({ type: 'token', token: auth.token }); src = `stream/${v.id}`; }
-      else src = URL.createObjectURL(await (await gfetch(`${API}/${v.id}?alt=media&supportsAllDrives=true`)).blob());
-    }
+    const { src, v } = await srcFor(t);
     if (P.cur !== t) return; // el usuario cambió de canción mientras cargaba
-    if (audio.dataset.blob) { URL.revokeObjectURL(audio.dataset.blob); delete audio.dataset.blob; }
-    if (src.startsWith('blob:') && !t.demo) audio.dataset.blob = src;
-    audio.src = src;
+    P.playing = v;
+    setSrc(audio, src, t.demo);
+    audio.volume = userVol();
     if (at) audio.currentTime = at;
     if (autoplay) await audio.play().catch(e => { if (e.name !== 'AbortError') console.warn(e); });
     const nx = P.queue[P.order[P.pos + 1]];
     if (nx?.demo) setTimeout(() => renderDemoAudio(nx), 400); // prepara la siguiente
   } catch (e) {
-    if (e instanceof AuthError) askReconnect('Tu sesión de Google expiró.');
+    P.needsLoad = true; P.resumeAt = at;
+    if (e instanceof AuthError || /popup|Google|sesi/i.test(e.message)) askReconnect('Conéctate a Google para reproducir.');
+    else if (e.message === 'offline') { P.waitNet = autoplay; toast('Sin conexión. Sonará cuando vuelva el internet.'); }
     else toast('No se pudo cargar la canción.');
   }
 }
@@ -485,20 +515,89 @@ function togglePlay() {
   if (P.needsLoad) return loadCurrent(true, P.resumeAt);
   audio.paused ? audio.play().catch(() => { }) : audio.pause();
 }
+
+// Siguiente posición según repetir / mezcla automática del modo DJ
+function nextPosition(auto) {
+  if (P.pos + 1 < P.order.length) return P.pos + 1;
+  if (P.repeat === 'all' || (!auto && !DJ.on)) { if (P.shuffle) { const cur = P.order[P.pos]; buildOrder(-1); P.order = P.order.filter(i => i !== cur).concat(cur); } return 0; }
+  if (DJ.on && DJ.endless && L.tracks.length) return extendQueue() ? P.pos + 1 : null;
+  return null;
+}
+// Mezcla automática: al terminar la lista sigue con canciones parecidas (mismo artista/álbum primero)
+function extendQueue() {
+  const cur = P.cur; const inQ = new Set(P.queue.map(t => t.id));
+  const pool = L.tracks.filter(t => !inQ.has(t.id) && (isDl(t) || navigator.onLine));
+  if (!pool.length) return false;
+  const near = shuffled(pool.filter(t => cur && (t.artistKey === cur.artistKey || t.albumKey === cur.albumKey))).slice(0, 4);
+  const rest = shuffled(pool.filter(t => !near.includes(t))).slice(0, 12 - near.length);
+  const add = shuffled([...near, ...rest]);
+  for (const t of add) { P.queue.push(t); P.order.push(P.queue.length - 1); }
+  renderQueue();
+  return true;
+}
+
 function next(auto = false) {
   if (!P.queue.length) return;
   if (auto && P.repeat === 'one') { audio.currentTime = 0; audio.play(); return; }
-  if (P.pos + 1 >= P.order.length) {
-    if (P.repeat === 'all' || !auto) { if (P.shuffle) buildOrder(-1); P.pos = 0; }
-    else { audio.pause(); audio.currentTime = 0; return; }
-  } else P.pos++;
-  loadCurrent(true);
+  if (DJ.mixing) finishMix();
+  if (DJ.on && !auto && P.cur && !audio.paused && !P.needsLoad) return startMix(true);
+  const n = nextPosition(auto);
+  if (n == null) { audio.pause(); audio.currentTime = 0; return; }
+  P.pos = n; loadCurrent(true);
 }
 function prev() {
   if (!P.queue.length) return;
+  finishMix();
   if (audio.currentTime > 3) { audio.currentTime = 0; return; }
   P.pos = Math.max(0, P.pos - 1); loadCurrent(true);
 }
+
+/* ---------- Modo DJ: transición cruzada entre canciones ---------- */
+async function startMix(manual = false) {
+  if (DJ.mixing) return;
+  const n = nextPosition(true); if (n == null) return;
+  const t = P.queue[P.order[n]];
+  if (!t.demo && !navigator.onLine && !isDl(t)) { P.pos = n; return loadCurrent(true); }
+  DJ.mixing = true; DJ.from = DJ.to = null; const seq = DJ.seq = (DJ.seq || 0) + 1;
+  const from = audio, to = otherAudio();
+  try {
+    const { src, v } = await srcFor(t);
+    if (seq !== DJ.seq) return;
+    setSrc(to, src, t.demo); to.volume = 0;
+    await to.play();
+    if (seq !== DJ.seq) { to.pause(); return; }
+    P.pos = n; P.cur = t; P.playing = v; audio = to;
+    updateNowPlaying(); markPlaying(); renderQueue(); saveSession(); updatePlayState();
+    const left = isFinite(from.duration) ? from.duration - from.currentTime : DJ.fade;
+    DJ.from = from; DJ.to = to; DJ.t0 = performance.now(); DJ.dur = Math.max(.8, manual ? Math.min(2.5, DJ.fade) : Math.min(DJ.fade, left)) * 1000;
+    djTick();
+  } catch (e) {
+    if (seq !== DJ.seq) return;
+    DJ.mixing = false; P.pos = n; loadCurrent(true);
+  }
+}
+function finishMix() {
+  if (!DJ.mixing) return;
+  if (DJ.from) { DJ.t0 = -1e12; djTick(); }
+  else { DJ.seq++; DJ.mixing = false; const o = otherAudio(); o.pause(); o.removeAttribute('src'); o.load(); }
+}
+function djTick() {
+  if (!DJ.mixing || !DJ.from) return;
+  const k = Math.min(1, (performance.now() - DJ.t0) / DJ.dur);
+  const vol = audio.muted ? 0 : userVol();
+  DJ.from.volume = Math.max(0, vol * Math.cos(k * Math.PI / 2));
+  DJ.to.volume = Math.min(1, vol * Math.sin(k * Math.PI / 2));
+  if (k >= 1 || DJ.from.ended) {
+    DJ.from.pause(); DJ.from.removeAttribute('src'); DJ.from.load(); DJ.from.volume = vol; DJ.to.volume = vol;
+    DJ.mixing = false; DJ.from = DJ.to = null; return;
+  }
+  clearTimeout(DJ.timer); DJ.timer = setTimeout(djTick, 50);
+}
+function toggleDJ() {
+  DJ.on = !DJ.on; store.set('dj', DJ.on); updateModes();
+  toast(DJ.on ? `Modo DJ activado · transiciones de ${DJ.fade} s${DJ.endless ? ' · mezcla automática' : ''}` : 'Modo DJ desactivado');
+}
+
 function toggleShuffle() {
   P.shuffle = !P.shuffle; store.set('shuffle', P.shuffle);
   if (P.queue.length) { const cur = P.order[P.pos]; buildOrder(cur); }
@@ -523,27 +622,40 @@ function restoreSession() {
 }
 function pushRecent(key) { const r = store.get('recent', []).filter(k => k !== key); r.unshift(key); store.set('recent', r.slice(0, 20)); }
 
-/* ---------- Eventos del audio ---------- */
+/* ---------- Eventos del audio (solo cuentan los del reproductor activo) ---------- */
+const onA = (evt, fn) => audios.forEach(a => a.addEventListener(evt, e => { if (e.target === audio) fn(e); }));
 let lastPosState = 0;
-audio.addEventListener('timeupdate', () => {
+onA('timeupdate', () => {
   setProgress(audio.currentTime, audio.duration || P.cur?.duration || 0);
+  syncLyrics();
+  if (DJ.mixing) djTick();
+  else if (DJ.on && P.repeat !== 'one' && isFinite(audio.duration) && audio.duration > DJ.fade * 2.5 && audio.duration - audio.currentTime <= DJ.fade && !audio.paused) startMix(false);
   const now = Date.now();
   if (now - lastPosState > 4000) { lastPosState = now; saveSession(); updatePositionState(); }
 });
-audio.addEventListener('loadedmetadata', () => {
+onA('loadedmetadata', () => {
   const t = P.cur; if (t && isFinite(audio.duration) && (!t.duration || Math.abs(t.duration - audio.duration) > 2)) { t.duration = audio.duration; }
   updatePositionState();
 });
-audio.addEventListener('play', updatePlayState);
-audio.addEventListener('pause', updatePlayState);
-audio.addEventListener('ended', () => next(true));
-audio.addEventListener('error', () => {
+onA('play', updatePlayState);
+onA('pause', updatePlayState);
+onA('ended', () => { if (!DJ.mixing) next(true); });
+onA('error', () => {
   if (!audio.src || P.cur?.demo) return;
-  if (!auth.valid()) { P.needsLoad = true; P.resumeAt = audio.currentTime; askReconnect('Tu sesión de Google expiró.'); return; }
+  const at = audio.currentTime;
+  if (!navigator.onLine) {
+    // Se cayó el internet a mitad de canción: intenta seguir con una descargada o espera a que vuelva la conexión
+    P.needsLoad = true; P.resumeAt = at; P.waitNet = true;
+    for (let k = P.pos + 1; k < P.order.length; k++) if (isDl(P.queue[P.order[k]])) { toast('Sin conexión: sigo con tus descargas.'); P.pos = k; return loadCurrent(true); }
+    toast('Sin conexión. La música seguirá cuando vuelva el internet.'); updatePlayState(); return;
+  }
+  if (!auth.valid()) { P.needsLoad = true; P.resumeAt = at; askReconnect('Tu sesión de Google expiró.'); return; }
   const code = audio.error?.code;
   toast(code === 4 ? 'Este formato no se puede reproducir en este dispositivo. Saltando…' : 'Error al reproducir. Saltando…');
   setTimeout(() => next(true), 1500);
 });
+// Al volver el internet, retoma donde se quedó
+window.addEventListener('online', () => { if (P.waitNet && P.needsLoad && P.cur) { P.waitNet = false; loadCurrent(true, P.resumeAt); } });
 
 /* ---------- Media Session (controles en la pantalla bloqueada / notificación) ---------- */
 function updateMediaSession() {
@@ -592,8 +704,8 @@ function seekTo(f) {
   if (P.needsLoad) { P.resumeAt = f * d; return loadCurrent(true, f * d); }
   audio.currentTime = f * d; updatePositionState();
 }
-function setVolume(v) { audio.volume = v; audio.muted = false; store.set('vol', v); updateVolume(); }
-function updateVolume() { const v = audio.muted ? 0 : audio.volume; volS.set(v); setIcon($('#btnMute'), v === 0 ? 'volumeOff' : 'volume'); }
+function setVolume(v) { store.set('vol', v); audios.forEach(a => { a.muted = false; if (!DJ.mixing) a.volume = v; }); updateVolume(); }
+function updateVolume() { const v = audio.muted ? 0 : userVol(); volS.set(v); setIcon($('#btnMute'), v === 0 ? 'volumeOff' : 'volume'); }
 
 function setProgress(cur, d) {
   const f = d ? cur / d : 0;
@@ -609,6 +721,7 @@ function updatePlayState() {
   $$('[data-play-btn]').forEach(b => setIcon(b, playing && P.ctx === b.dataset.playBtn ? 'pause' : 'play'));
 }
 function updateModes() {
+  for (const b of ['#btnDJ', '#fpDJ']) $(b)?.classList.toggle('on', DJ.on);
   for (const b of ['#btnShuffle', '#fpShuffle']) $(b).classList.toggle('on', P.shuffle);
   for (const b of ['#btnRepeat', '#fpRepeat']) { $(b).classList.toggle('on', P.repeat !== 'off'); setIcon($(b), P.repeat === 'one' ? 'repeatOne' : 'repeat'); }
 }
@@ -628,6 +741,7 @@ async function updateNowPlaying() {
   $('#fpQuality').textContent = (qv.hires ? 'HI-RES · ' : qv.lossless ? 'LOSSLESS · ' : '') + (qv.qLong || '') + (isDl(t) ? ' · DESCARGADA' : '');
   $('#fpFrom').textContent = P.ctx.startsWith('album:') ? t.album : P.ctx.startsWith('artist:') ? t.artist : P.ctx === 'liked' ? 'Tus me gusta' : P.ctx.startsWith('playlist:') ? (playlists.find(p => 'playlist:' + p.id === P.ctx)?.name || 'Lista') : P.ctx === 'downloads' ? 'Descargas' : 'Tu biblioteca';
   updateLikeButtons(); updateMediaSession();
+  if (LY.open && LY.track !== t) renderLyrics(t);
   document.title = `${t.title} · ${t.artist}`;
   const c = await colorOf(t.albumKey);
   if (P.cur !== t) return;
@@ -688,6 +802,7 @@ async function runDownloads() {
       const type = MIME[t.ext] || r.headers.get('content-type') || 'audio/mpeg';
       await cache.put(new Request(streamUrl(t.id)), new Response(counted, { headers: { 'Content-Type': type, 'Content-Length': String(total) } }));
       downloaded.add(t.id); saveDl(); refreshDlMarks();
+      getLyrics(L.byId.get(t.id) || t).catch(() => { }); // guarda la letra para verla sin internet
     } catch (e) {
       if (e instanceof AuthError) { askReconnect('Tu sesión expiró. Reconecta para seguir descargando.'); DL.queue.length = 0; break; }
       toast('No se pudo descargar: ' + t.title);
@@ -866,6 +981,118 @@ document.addEventListener('change', e => {
   const s = e.target.closest('[data-sort]'); if (!s) return;
   store.set('sort.' + s.dataset.sort, s.value); rerender(true);
 });
+
+/* =========================================================
+   Letras (incrustadas en el archivo, .lrc en Drive o LRCLIB en internet)
+   ========================================================= */
+const LY = { open: false, track: null, lines: null, idx: -1, userScroll: 0 };
+const lyrKey = t => 'lyr:' + norm(t.albumArtist || t.artist) + '|' + norm(t.title);
+const cleanTitle = s => String(s || '').replace(/\s*[\(\[][^\)\]]*(feat|ft\.|remaster|live|version|remix|edit|slowed|mono|stereo)[^\)\]]*[\)\]]/gi, '').replace(/\s+-\s+.*(remaster|version|slowed|live|mix|edit|mono|stereo|en vivo).*$/i, '').trim();
+function parseLRC(text) {
+  const out = [];
+  for (const raw of String(text).split(/\r?\n/)) {
+    const tags = [...raw.matchAll(/\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g)];
+    if (!tags.length) continue;
+    const txt = raw.replace(/\[[^\]]*\]/g, '').trim();
+    for (const m of tags) out.push({ t: +m[1] * 60 + +m[2] + (m[3] ? +('0.' + m[3].padEnd(3, '0')) : 0), txt });
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+function lrcFor(t) {
+  const list = L.raw?.lrc; if (!list?.length) return null;
+  const vs = t.variants || [t];
+  for (const v of vs) {
+    const base = norm(String(v.file || '').replace(/\.[^.]+$/, ''));
+    const hit = list.find(f => f.parents?.[0] === v.folderId && norm(f.name.replace(/\.lrc$/i, '')) === base);
+    if (hit) return hit;
+  }
+  return null;
+}
+async function lrclib(t) {
+  const title = cleanTitle(t.title), artist = (t.artist || '').split(/,|&| feat/i)[0].trim();
+  try {
+    const q = new URLSearchParams({ artist_name: artist, track_name: title });
+    if (t.album && !/sin álbum/i.test(t.album)) q.set('album_name', t.album);
+    if (t.duration) q.set('duration', Math.round(t.duration));
+    let r = await fetch('https://lrclib.net/api/get?' + q);
+    if (r.ok) { const j = await r.json(); if (j.syncedLyrics || j.plainLyrics) return { text: j.syncedLyrics || j.plainLyrics, src: 'LRCLIB' }; }
+    r = await fetch('https://lrclib.net/api/search?' + new URLSearchParams({ track_name: title, artist_name: artist }));
+    if (r.ok) {
+      const arr = await r.json();
+      const near = arr.filter(x => !t.duration || Math.abs((x.duration || 0) - t.duration) < 8);
+      const best = near.find(x => x.syncedLyrics) || near.find(x => x.plainLyrics) || arr.find(x => x.syncedLyrics) || arr.find(x => x.plainLyrics);
+      if (best) return { text: best.syncedLyrics || best.plainLyrics, src: 'LRCLIB' };
+    }
+  } catch { }
+  return null;
+}
+async function getLyrics(t) {
+  if (t.demo) return { none: true };
+  const key = lyrKey(t);
+  const cached = await idb.get('kv', key).catch(() => null);
+  if (cached) return cached;
+  let res = null;
+  for (const v of (t.variants || [t])) { const g = await idb.get('tags', v.id).catch(() => null); if (g?.lyrics) { res = { text: g.lyrics, src: 'archivo' }; break; } }
+  if (!res && navigator.onLine && mode === 'drive') {
+    const lrc = lrcFor(t);
+    if (lrc && auth.valid()) try { res = { text: await (await gfetch(`${API}/${lrc.id}?alt=media&supportsAllDrives=true`)).text(), src: 'archivo .lrc' }; } catch { }
+    if (!res && auth.valid()) {
+      const v = variantFor(t, 'max'); const g = await idb.get('tags', v.id).catch(() => null);
+      if (!g?.lyrChecked) try {
+        const r = await readTags({ size: v.size, ext: v.ext, fetchRange: (a, b) => fetchRange(v.id, a, b) });
+        if (g) { g.lyrChecked = true; if (r.lyrics) g.lyrics = r.lyrics; idb.set('tags', v.id, g).catch(() => { }); }
+        if (r.lyrics) res = { text: r.lyrics, src: 'archivo' };
+      } catch { }
+    }
+    if (!res) res = await lrclib(t);
+  }
+  if (!res) return navigator.onLine ? { none: true } : { offline: true };
+  idb.set('kv', key, res).catch(() => { });
+  return res;
+}
+function openLyrics() {
+  if (!P.cur) return toast('Reproduce una canción para ver su letra.');
+  $('#btnLyrics')?.classList.add('on'); LY.open = true; $('#lyrics').classList.add('open'); $('#lyrics').setAttribute('aria-hidden', 'false');
+  renderLyrics(P.cur);
+}
+function closeLyrics() { $('#btnLyrics')?.classList.remove('on'); LY.open = false; $('#lyrics').classList.remove('open'); $('#lyrics').setAttribute('aria-hidden', 'true'); }
+async function renderLyrics(t) {
+  LY.track = t; LY.lines = null; LY.idx = -1;
+  const body = $('#lyricsBody');
+  $('#lyTitle').textContent = t.title; $('#lyArtist').textContent = t.artist;
+  colorOf(t.albumKey).then(c => { if (LY.track === t) $('#lyrics').style.background = `linear-gradient(rgb(${c}), rgb(${c.map(v => v * .4 | 0)}) 70%, #0c0c0f)`; });
+  body.innerHTML = '<p class="ly-msg">Buscando la letra…</p>';
+  const r = await getLyrics(t);
+  if (LY.track !== t) return;
+  if (r.offline) body.innerHTML = '<p class="ly-msg">Sin conexión.<br><small>Las letras que ya abriste antes, y las de canciones descargadas, sí se ven sin internet.</small></p>';
+  else if (r.none) body.innerHTML = `<p class="ly-msg">No encontramos la letra de esta canción.<br><small>Puedes poner un archivo <b>.lrc</b> con el mismo nombre que la canción en tu carpeta de Drive.</small></p>`;
+  else {
+    const lines = parseLRC(r.text);
+    if (lines.length) {
+      LY.lines = lines;
+      body.innerHTML = `<div class="ly-pad"></div>${lines.map(l => `<p class="ly-line" data-lt="${l.t}">${esc(l.txt) || '♪'}</p>`).join('')}<p class="ly-src">Letra: ${esc(r.src)}</p><div class="ly-pad"></div>`;
+      syncLyrics(true);
+    } else body.innerHTML = r.text.split(/\r?\n/).map(l => `<p class="ly-plain">${esc(l) || '&nbsp;'}</p>`).join('') + `<p class="ly-src">Letra: ${esc(r.src)} · sin sincronizar</p>`;
+  }
+}
+function syncLyrics(force = false) {
+  if (!LY.open || !LY.lines || LY.track !== P.cur) return;
+  const now = audio.currentTime + .25; let i = -1;
+  for (let k = 0; k < LY.lines.length; k++) { if (LY.lines[k].t <= now) i = k; else break; }
+  if (i === LY.idx && !force) return;
+  LY.idx = i;
+  const els = $$('#lyricsBody .ly-line');
+  els.forEach((e, k) => { e.classList.toggle('on', k === i); e.classList.toggle('past', k < i); });
+  const cur = els[Math.max(0, i)];
+  if (cur && Date.now() - LY.userScroll > 3500) cur.scrollIntoView({ block: 'center', behavior: force ? 'auto' : 'smooth' });
+}
+$('#lyricsBody').addEventListener('click', e => {
+  const l = e.target.closest('[data-lt]'); if (!l) return;
+  const t = +l.dataset.lt; LY.userScroll = 0;
+  if (P.needsLoad) return loadCurrent(true, t);
+  audio.currentTime = t; if (audio.paused) audio.play().catch(() => { });
+});
+['wheel', 'touchmove'].forEach(ev => $('#lyricsBody').addEventListener(ev, () => { LY.userScroll = Date.now(); }, { passive: true }));
 
 /* ---------- Cola ---------- */
 function renderQueue() {
@@ -1201,10 +1428,10 @@ on('#btnPrev', prev); on('#fpPrev', prev);
 on('#btnShuffle', toggleShuffle); on('#fpShuffle', toggleShuffle);
 on('#btnRepeat', cycleRepeat); on('#fpRepeat', cycleRepeat);
 on('#plLike', () => P.cur && toggleLike(P.cur.id)); on('#fpLike', () => P.cur && toggleLike(P.cur.id));
-on('#btnMute', () => { audio.muted = !audio.muted; updateVolume(); });
+on('#btnMute', () => { const m = !audio.muted; audios.forEach(a => a.muted = m); updateVolume(); });
 on('#btnQueue', () => toggleQueue()); on('#fpQueue', () => toggleQueue()); on('#queueClose', closeQueue);
 on('#btnBack', () => history.back()); on('#btnFwd', () => history.forward());
-on('#plCover', () => { if (P.cur) location.hash = '#/album/' + enc(P.cur.albumKey); });
+on('#plCover', () => { if (!P.cur) return; if (isMobile()) openFull(); else location.hash = '#/album/' + enc(P.cur.albumKey); });
 on('#fpClose', closeFull);
 $('#player').addEventListener('click', e => { if (isMobile() && P.cur && !e.target.closest('button')) openFull(); });
 
@@ -1229,7 +1456,7 @@ document.addEventListener('keydown', e => {
   else if (e.code === 'ArrowLeft' && (e.ctrlKey || e.metaKey)) prev();
   else if (e.code === 'ArrowRight') audio.currentTime = Math.min(dur(), audio.currentTime + 5);
   else if (e.code === 'ArrowLeft') audio.currentTime = Math.max(0, audio.currentTime - 5);
-  else if (e.key === 'Escape') { closeFull(); closeQueue(); closeSettings(); closeMenu(); }
+  else if (e.key === 'Escape') { closeFull(); closeQueue(); closeSettings(); closeMenu(); closeLyrics(); }
 });
 
 /* ---------- Toast ---------- */
@@ -1251,6 +1478,7 @@ function askReconnect(msg) {
 function openSettings() {
   $('#setFolder').value = store.get('folder', '') || CFG.MUSIC_FOLDER || '';
   $('#setQuality').value = settings.quality; $('#setDlQuality').value = settings.dlQuality;
+  $('#setDJ').checked = DJ.on; $('#setDJFade').value = DJ.fade; $('#setDJFadeVal').textContent = DJ.fade + ' s'; $('#setDJEndless').checked = DJ.endless;
   const at = L.raw?.at ? new Date(L.raw.at).toLocaleString() : '—';
   $('#setInfo').innerHTML = mode === 'demo' ? 'Modo demostración. Cierra sesión para conectar tu Google Drive.' : `${L.tracks.length} canciones · ${L.albums.size} álbumes · ${L.artists.size} artistas<br>Último escaneo: ${esc(at)}`;
   $('#setRescan').style.display = mode === 'demo' ? 'none' : '';
@@ -1269,6 +1497,9 @@ $('#setQuality').addEventListener('change', e => {
   settings.quality = e.target.value; store.set('quality', settings.quality);
   buildLibrary(L.all); rerender(true); toast(settings.quality === 'max' ? 'Calidad máxima activada' : 'Ahorro de datos activado');
 });
+$('#setDJ').addEventListener('change', e => { if (e.target.checked !== DJ.on) toggleDJ(); });
+$('#setDJFade').addEventListener('input', e => { DJ.fade = +e.target.value; store.set('djFade', DJ.fade); $('#setDJFadeVal').textContent = DJ.fade + ' s'; });
+$('#setDJEndless').addEventListener('change', e => { DJ.endless = e.target.checked; store.set('djEndless', DJ.endless); });
 $('#setDlQuality').addEventListener('change', e => { settings.dlQuality = e.target.value; store.set('dlQuality', settings.dlQuality); });
 on('#setClearDl', async () => {
   if (!downloaded.size) return toast('No hay descargas.');
@@ -1357,6 +1588,8 @@ on('#btnProfile', () => {
   };
 });
 on('#btnScan', manualScan);
+on('#btnLyrics', () => LY.open ? closeLyrics() : openLyrics()); on('#fpLyrics', openLyrics); on('#lyClose', closeLyrics);
+on('#btnDJ', toggleDJ); on('#fpDJ', toggleDJ);
 on('#profilesClose', closeProfiles);
 on('#loginProfile', () => openProfiles(false));
 
@@ -1384,7 +1617,7 @@ function startDemo() {
 
 async function init() {
   hydrate();
-  audio.volume = store.get('vol', 0.8); updateVolume(); updateModes(); updateNowPlaying();
+  audios.forEach(a => a.volume = store.get('vol', 0.8)); updateVolume(); updateModes(); updateNowPlaying();
   auth.load(); parseRoute(); updateProfileBtn();
   if (auth.valid()) auth.save(); // el reproductor en segundo plano usa la sesión de este perfil
   const p = curProfile(); $('#loginProfile').innerHTML = `${avatar(p, 'tiny')} Perfil: <b>${esc(p.name)}</b> · cambiar`;
@@ -1401,7 +1634,12 @@ async function init() {
     else if (!had) askReconnect('Conéctate a Google para cargar tu música.');
   } else { render(); showLogin(true); }
 }
-init();
+// Si algo falla, la app avisa y sigue funcionando en vez de cerrarse
+let lastErr = 0;
+const softError = (e) => { console.error(e); if (Date.now() - lastErr > 8000) { lastErr = Date.now(); try { toast('Algo falló, pero la app sigue funcionando.'); } catch { } } };
+window.addEventListener('error', e => { if (e.filename && !e.filename.includes(location.host)) return; softError(e.error || e.message); });
+window.addEventListener('unhandledrejection', e => { e.preventDefault(); if (e.reason instanceof AuthError) return; console.warn(e.reason); });
+init().catch(e => { softError(e); try { render(); } catch { } });
 
 // Exponer para depuración
-window.sonora = { L, P, auth, PROFILES };
+window.sonora = { L, P, DJ, auth, PROFILES };

@@ -81,6 +81,15 @@ function parseID3(b) {
     if (ver === 4) { const ff = b[p + 9]; if (ff & 0x01) d = d.subarray(4); if (ff & 0x02) d = unsync(d); }
     const key = ID3MAP[id];
     if (key && !out[key]) out[key] = decodeText(d[0], d.subarray(1));
+    else if ((id === 'USLT' || id === 'ULT') && complete && !out.lyrics) {
+      try {
+        const enc = d[0]; let q = 4;
+        if (enc === 1 || enc === 2) { while (q + 1 < d.length && !(d[q] === 0 && d[q + 1] === 0)) q += 2; q += 2; }
+        else { while (q < d.length && d[q] !== 0) q++; q++; }
+        const raw = d.subarray(q);
+        out.lyrics = (enc === 0 ? latin1(raw) : enc === 3 ? utf8.decode(raw) : enc === 2 ? new TextDecoder('utf-16be').decode(raw) : (raw[0] === 0xFE ? new TextDecoder('utf-16be').decode(raw.subarray(2)) : new TextDecoder('utf-16le').decode(raw[0] === 0xFF ? raw.subarray(2) : raw))).replace(/\0/g, '').trim();
+      } catch { }
+    }
     else if ((id === 'APIC' || id === 'PIC') && complete) {
       try { const pic = parsePic(d, id === 'PIC'); if (pic.data.length > 100 && (!out.picture || pic.type === 3)) out.picture = pic; } catch { }
     }
@@ -123,7 +132,7 @@ function mp3Info(b, start, bytesFromStart) {
 }
 
 /* ---------------- Vorbis comments (FLAC / OGG) ---------------- */
-const VMAP = { TITLE: 'title', ARTIST: 'artist', ALBUM: 'album', ALBUMARTIST: 'albumArtist', 'ALBUM ARTIST': 'albumArtist', TRACKNUMBER: 'track', DISCNUMBER: 'disc', DATE: 'year', YEAR: 'year', GENRE: 'genre' };
+const VMAP = { LYRICS: 'lyrics', UNSYNCEDLYRICS: 'lyrics', 'UNSYNCED LYRICS': 'lyrics', TITLE: 'title', ARTIST: 'artist', ALBUM: 'album', ALBUMARTIST: 'albumArtist', 'ALBUM ARTIST': 'albumArtist', TRACKNUMBER: 'track', DISCNUMBER: 'disc', DATE: 'year', YEAR: 'year', GENRE: 'genre' };
 function vorbis(b, out) {
   let p = 0; if (p + 4 > b.length) return;
   const vlen = le32(b, p); p += 4 + vlen; if (p + 4 > b.length) return;
@@ -199,7 +208,7 @@ function parseM4A(b, out = {}) {
     const du = v === 1 ? be32(b, mv + 28) * 4294967296 + be32(b, mv + 32) : be32(b, mv + 20);
     if (ts) out.duration = du / ts;
   }
-  const atoms = [['©nam', 'title'], ['©ART', 'artist'], ['aART', 'albumArtist'], ['©alb', 'album'], ['©day', 'year'], ['©gen', 'genre']];
+  const atoms = [['©lyr', 'lyrics'], ['©nam', 'title'], ['©ART', 'artist'], ['aART', 'albumArtist'], ['©alb', 'album'], ['©day', 'year'], ['©gen', 'genre']];
   for (const [name, key] of atoms) {
     if (out[key]) continue;
     const i = indexOfStr(b, name);
