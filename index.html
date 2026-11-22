@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0b0f">
+  <meta name="description" content="Tu música de Google Drive, en máxima calidad.">
+  <title>Sonora</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" type="image/png" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+  <script src="config.js"></script>
+</head>
+<body>
+<div class="app" id="app">
+
+  <!-- Barra lateral (PC) -->
+  <aside class="sidebar">
+    <div class="panel nav-panel">
+      <a class="brand" href="#/home">
+        <img src="icons/icon-192.png" alt=""><span>Sonora</span>
+      </a>
+      <nav class="side-nav">
+        <a href="#/home" data-nav="home"><i data-icon="home"></i><span>Inicio</span></a>
+        <a href="#/search" data-nav="search"><i data-icon="search"></i><span>Buscar</span></a>
+      </nav>
+    </div>
+    <div class="panel lib-panel">
+      <div class="lib-head">
+        <a href="#/library" data-nav="library"><i data-icon="library"></i><span>Tu biblioteca</span></a>
+      </div>
+      <div class="lib-list" id="sideLibrary"></div>
+    </div>
+  </aside>
+
+  <!-- Contenido principal -->
+  <main class="main" id="main">
+    <header class="topbar" id="topbar">
+      <div class="topbar-nav">
+        <button class="round" id="btnBack" aria-label="Atrás"><i data-icon="chevronLeft"></i></button>
+        <button class="round" id="btnFwd" aria-label="Adelante"><i data-icon="chevronRight"></i></button>
+      </div>
+      <div class="topbar-title" id="topTitle"></div>
+      <div class="topbar-actions">
+        <span class="scan-status" id="scanStatus"></span>
+        <button class="round" id="btnSettings" aria-label="Ajustes"><i data-icon="settings"></i></button>
+      </div>
+    </header>
+    <div class="view" id="view"></div>
+  </main>
+
+  <!-- Reproductor inferior -->
+  <footer class="player" id="player">
+    <div class="pl-progress-mini"><div id="miniProgress"></div></div>
+    <div class="pl-left" id="plLeft">
+      <div class="pl-cover" id="plCover"></div>
+      <div class="pl-meta">
+        <div class="pl-title" id="plTitle">Nada reproduciéndose</div>
+        <div class="pl-artist" id="plArtist">Elige una canción</div>
+      </div>
+      <button class="icon-btn like-btn" id="plLike" aria-label="Me gusta"><i data-icon="heart"></i></button>
+    </div>
+    <div class="pl-center">
+      <div class="pl-controls">
+        <button class="icon-btn" id="btnShuffle" aria-label="Aleatorio"><i data-icon="shuffle"></i></button>
+        <button class="icon-btn" id="btnPrev" aria-label="Anterior"><i data-icon="prev"></i></button>
+        <button class="play-btn" id="btnPlay" aria-label="Reproducir"><i data-icon="play"></i></button>
+        <button class="icon-btn" id="btnNext" aria-label="Siguiente"><i data-icon="next"></i></button>
+        <button class="icon-btn" id="btnRepeat" aria-label="Repetir"><i data-icon="repeat"></i></button>
+      </div>
+      <div class="pl-seek">
+        <span class="time" id="tCur">0:00</span>
+        <div class="slider" id="seek"><div class="slider-fill"></div><div class="slider-knob"></div></div>
+        <span class="time" id="tDur">0:00</span>
+      </div>
+    </div>
+    <div class="pl-right">
+      <span class="quality" id="plQuality"></span>
+      <button class="icon-btn" id="btnQueue" aria-label="Cola"><i data-icon="queue"></i></button>
+      <button class="icon-btn" id="btnMute" aria-label="Silenciar"><i data-icon="volume"></i></button>
+      <div class="slider vol" id="vol"><div class="slider-fill"></div><div class="slider-knob"></div></div>
+    </div>
+    <button class="play-btn mini-play" id="btnPlayMini" aria-label="Reproducir"><i data-icon="play"></i></button>
+  </footer>
+
+  <!-- Navegación inferior (móvil) -->
+  <nav class="bottomnav">
+    <a href="#/home" data-nav="home"><i data-icon="home"></i><span>Inicio</span></a>
+    <a href="#/search" data-nav="search"><i data-icon="search"></i><span>Buscar</span></a>
+    <a href="#/library" data-nav="library"><i data-icon="library"></i><span>Biblioteca</span></a>
+  </nav>
+
+  <!-- Reproductor a pantalla completa (móvil) -->
+  <section class="fullplayer" id="fullplayer" aria-hidden="true">
+    <div class="fp-bg" id="fpBg"></div>
+    <div class="fp-inner">
+      <div class="fp-top">
+        <button class="icon-btn" id="fpClose" aria-label="Cerrar"><i data-icon="chevronDown"></i></button>
+        <div class="fp-from"><small>Reproduciendo desde</small><b id="fpFrom">Tu biblioteca</b></div>
+        <button class="icon-btn" id="fpQueue" aria-label="Cola"><i data-icon="queue"></i></button>
+      </div>
+      <div class="fp-cover" id="fpCover"></div>
+      <div class="fp-meta">
+        <div>
+          <div class="fp-title" id="fpTitle"></div>
+          <div class="fp-artist" id="fpArtist"></div>
+        </div>
+        <button class="icon-btn like-btn big" id="fpLike" aria-label="Me gusta"><i data-icon="heart"></i></button>
+      </div>
+      <div class="slider fp-seek" id="fpSeek"><div class="slider-fill"></div><div class="slider-knob"></div></div>
+      <div class="fp-times"><span id="fpCur">0:00</span><span id="fpDur">0:00</span></div>
+      <div class="fp-controls">
+        <button class="icon-btn" id="fpShuffle" aria-label="Aleatorio"><i data-icon="shuffle"></i></button>
+        <button class="icon-btn big" id="fpPrev" aria-label="Anterior"><i data-icon="prev"></i></button>
+        <button class="play-btn huge" id="fpPlay" aria-label="Reproducir"><i data-icon="play"></i></button>
+        <button class="icon-btn big" id="fpNext" aria-label="Siguiente"><i data-icon="next"></i></button>
+        <button class="icon-btn" id="fpRepeat" aria-label="Repetir"><i data-icon="repeat"></i></button>
+      </div>
+      <div class="fp-quality" id="fpQuality"></div>
+    </div>
+  </section>
+
+  <!-- Cola -->
+  <section class="queue" id="queuePanel" aria-hidden="true">
+    <div class="queue-head">
+      <h3>Cola de reproducción</h3>
+      <button class="icon-btn" id="queueClose" aria-label="Cerrar"><i data-icon="close"></i></button>
+    </div>
+    <div class="queue-body" id="queueBody"></div>
+  </section>
+
+  <!-- Ajustes -->
+  <div class="modal" id="settings" aria-hidden="true">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Ajustes</h3>
+        <button class="icon-btn" id="settingsClose" aria-label="Cerrar"><i data-icon="close"></i></button>
+      </div>
+      <label class="field">
+        <span>Carpeta de música en Drive</span>
+        <input id="setFolder" placeholder="Vacío = buscar en todo mi Drive  (ej. Musica)">
+        <small>Solo se mostrarán canciones dentro de una carpeta con este nombre.</small>
+      </label>
+      <div class="modal-actions">
+        <button class="btn" id="setRescan"><i data-icon="refresh"></i> Volver a escanear</button>
+        <button class="btn ghost" id="setLogout">Cerrar sesión</button>
+      </div>
+      <p class="muted small" id="setInfo"></p>
+    </div>
+  </div>
+
+  <!-- Pantalla de inicio de sesión -->
+  <section class="login" id="login">
+    <div class="login-glow"></div>
+    <div class="login-card">
+      <img src="icons/icon-512.png" class="login-logo" alt="">
+      <h1>Sonora</h1>
+      <p>Tu música de Google Drive.<br>Sin anuncios. En su calidad original.</p>
+      <button class="btn primary big" id="btnLogin"><i data-icon="drive"></i> Conectar Google Drive</button>
+      <button class="btn ghost" id="btnDemo">Probar con música de demostración</button>
+      <p class="muted small" id="loginNote"></p>
+    </div>
+  </section>
+
+  <div class="toast" id="toast"></div>
+</div>
+
+<audio id="audio" preload="auto"></audio>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
