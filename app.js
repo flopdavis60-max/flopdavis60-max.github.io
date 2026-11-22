@@ -192,7 +192,7 @@ function applyTags(t, g) {
   if (!g || g.failed) return;
   if (g.title) t.title = g.title;
   if (g.artist) t.artist = g.artist;
-  if (g.album) t.album = g.album;
+  if (g.album) { t.album = g.album; t.tagAlbum = true; }
   if (g.albumArtist) t.albumArtist = g.albumArtist;
   if (g.track) t.trackNo = parseInt(g.track) || t.trackNo;
   if (g.disc) t.disc = parseInt(g.disc) || 1;
@@ -221,6 +221,8 @@ function buildLibrary(allTracks) {
     const aa = t.albumArtist || t.artist;
     t.albumKey = norm(aa) + '|' + norm(t.album);
     t.artistKey = norm(t.artist);
+    // Canciones sin álbum en sus etiquetas: carátula propia (no la de la carpeta entera)
+    t.coverKey = (t.demo || t.tagAlbum) ? t.albumKey : 't:' + t.id;
     byId.set(t.id, t);
     let al = albums.get(t.albumKey);
     if (!al) albums.set(t.albumKey, al = { key: t.albumKey, title: t.album, artist: aa, artistKey: norm(aa), year: t.year, tracks: [], mod: t.mod || '', folderId: t.folderId });
@@ -242,12 +244,20 @@ const sortedArtists = () => [...L.artists.values()].sort((a, b) => b.tracks.leng
 const artistCover = ar => (ar.albums.find(a => coverURLs.has(a.key)) || ar.albums[0])?.key || ar.key;
 
 /* ---------- Portadas ---------- */
+// Carátula a mostrar para una canción: la suya propia si existe; si no, la del álbum/carpeta
+const ckey = t => (t && t.coverKey && coverURLs.has(t.coverKey)) ? t.coverKey : t?.albumKey;
+function cvT(t, cls = '', ph = 'note') {
+  const u = coverURLs.get(ckey(t));
+  const k = t.coverKey || t.albumKey;
+  if (u) return `<span class="cv ${cls}" data-cover="${esc(k)}" style="background-image:url(&quot;${u}&quot;)"></span>`;
+  return cv(k, cls, ph);
+}
 function setCover(key, blobOrUrl) {
   if (!key || coverURLs.has(key)) return;
   const url = typeof blobOrUrl === 'string' ? blobOrUrl : URL.createObjectURL(blobOrUrl);
   coverURLs.set(key, url);
   $$(`[data-cover="${CSS.escape(key)}"]`).forEach(el => { el.classList.remove('ph'); el.innerHTML = ''; el.style.backgroundImage = `url("${url}")`; });
-  if (P.cur?.albumKey === key) updateNowPlaying();
+  if (P.cur && (P.cur.albumKey === key || P.cur.coverKey === key)) { if (P.cur.coverKey === key) coverColors.delete(P.cur.albumKey); updateNowPlaying(); }
 }
 function cv(key, cls = '', ph = 'album') {
   const u = coverURLs.get(key);
@@ -324,6 +334,7 @@ async function materialize(raw, readNew) {
   rerender();
   if (readNew && todo.length) await enrich(todo, raw);
   if (readNew) await folderCovers(raw);
+  onlineCovers();
 }
 
 async function scanDrive() {
@@ -420,6 +431,85 @@ async function folderCovers(raw) {
     } catch (e) { if (e instanceof AuthError) break; }
   }
 }
+
+/* ---------- Carátulas automáticas desde internet (catálogo de iTunes) ---------- */
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const autoCoversOn = () => store.get('autoCovers', true);
+let coversRunning = false, coversAgain = false;
+const cleanQ = s => String(s || '').replace(/\(.*?\)|\[.*?\]/g, ' ').replace(/\s(feat|ft)\.?\s.*$/i, ' ')
+  .replace(/\b(remaster(ed)?|deluxe( edition)?|hi-?res|24bit|flac|320 ?kbps)\b/gi, ' ').replace(/[_]+/g, ' ').replace(/\s+/g, ' ').trim();
+function simil(a, b) {
+  a = norm(cleanQ(a)).replace(/[^\p{L}\p{N} ]/gu, ''); b = norm(cleanQ(b)).replace(/[^\p{L}\p{N} ]/gu, '');
+  if (!a || !b) return 0; if (a === b) return 1;
+  if (a.includes(b) || b.includes(a)) return .85;
+  const A = new Set(a.split(' ')), B = new Set(b.split(' ')); let n = 0; for (const w of A) if (B.has(w)) n++;
+  return n / Math.max(A.size, B.size);
+}
+const knownArtist = a => a && !/^artista desconocido$/i.test(a);
+async function itunes(params) {
+  const u = 'https://itunes.apple.com/search?' + new URLSearchParams({ media: 'music', limit: '15', ...params });
+  for (let i = 0; i < 3; i++) {
+    const r = await fetch(u);
+    if (r.status === 403 || r.status === 429) { await sleep(20000 * (i + 1)); continue; } // límite de consultas: esperar
+    if (!r.ok) throw new Error('itunes ' + r.status);
+    return (await r.json()).results || [];
+  }
+  throw new Error('itunes ocupado');
+}
+async function findArt({ artist, album, title }) {
+  const ar = knownArtist(artist) ? cleanQ(artist) : '';
+  const pick = (res, nameKey, want, min) => {
+    let best = null, bs = 0;
+    for (const r of res) {
+      const s = simil(r[nameKey], want) * .6 + (ar ? simil(r.artistName, ar) * .4 : .25);
+      if (s > bs) { bs = s; best = r; }
+    }
+    return best && bs >= min ? best.artworkUrl100 : null;
+  };
+  if (album) {
+    const art = pick(await itunes({ term: `${ar} ${cleanQ(album)}`.trim(), entity: 'album' }), 'collectionName', album, .62);
+    if (art) return art;
+  }
+  if (title) {
+    const art = pick(await itunes({ term: `${ar} ${cleanQ(title)}`.trim(), entity: 'song' }), 'trackName', title, .66);
+    if (art) return art;
+  }
+  return null;
+}
+async function onlineCovers() {
+  if (coversRunning) { coversAgain = true; return; }
+  if (!autoCoversOn() || !navigator.onLine || mode === 'demo' || !L.albums?.size) return;
+  coversRunning = true; coversAgain = false;
+  try {
+    const misses = store.get('cvmiss', {}), now = Date.now(), WEEK = 7 * 864e5;
+    const jobs = [];
+    for (const al of L.albums.values()) {
+      const tagged = al.tracks.some(t => t.tagAlbum);
+      if (tagged) { if (!coverURLs.has(al.key)) jobs.push({ key: al.key, album: al.title, artist: al.artist, title: al.tracks[0]?.title }); continue; }
+      if (coverURLs.has(al.key) && !/^sin álbum$/i.test(al.title)) continue; // carpeta con su propia imagen
+      for (const t of al.tracks) if (!coverURLs.has(t.coverKey)) jobs.push({ key: t.coverKey, artist: t.artist, title: t.title, albumKey: al.key });
+    }
+    const todo = jobs.filter(j => !(misses[j.key] > now - WEEK));
+    let found = 0;
+    for (const [i, j] of todo.entries()) {
+      if (!navigator.onLine || !autoCoversOn()) break;
+      if (todo.length > 2 && !scanning) setScan(`Buscando carátulas ${i + 1}/${todo.length}`);
+      try {
+        const art = await findArt(j);
+        const blob = art ? await (await fetch(art.replace(/\/\d+x\d+(bb)?\.(jpg|png|webp)$/i, '/600x600bb.jpg'))).blob() : null;
+        if (blob && blob.size > 1000 && blob.type.startsWith('image/')) {
+          idb.set('covers', j.key, blob).catch(() => { }); setCover(j.key, blob); found++; delete misses[j.key];
+          if (j.albumKey && !coverURLs.has(j.albumKey)) { idb.set('covers', j.albumKey, blob).catch(() => { }); setCover(j.albumKey, blob); }
+        } else misses[j.key] = now;
+      } catch { misses[j.key] = now - WEEK + 864e5; } // fallo de red: reintentar mañana
+      store.set('cvmiss', misses);
+      await sleep(900);
+    }
+    if (todo.length > 2 && !scanning) setScan('');
+    if (found) toast(found === 1 ? 'Se agregó 1 carátula automáticamente' : `Se agregaron ${found} carátulas automáticamente`);
+  } finally { coversRunning = false; if (coversAgain) setTimeout(onlineCovers, 1000); }
+}
+window.addEventListener('online', () => setTimeout(onlineCovers, 3000));
 
 /* =========================================================
    Reproductor
@@ -660,7 +750,7 @@ window.addEventListener('online', () => { if (P.waitNet && P.needsLoad && P.cur)
 /* ---------- Media Session (controles en la pantalla bloqueada / notificación) ---------- */
 function updateMediaSession() {
   if (!('mediaSession' in navigator) || !P.cur) return;
-  const t = P.cur; const art = coverURLs.get(t.albumKey);
+  const t = P.cur; const art = coverURLs.get(ckey(t));
   navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist, album: t.album, artwork: art ? [{ src: art, sizes: '512x512' }] : [{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }] });
 }
 function updatePositionState() {
@@ -729,7 +819,7 @@ async function updateNowPlaying() {
   const t = P.cur; const pl = $('#player');
   if (!t) { pl.classList.add('hidden'); return; }
   pl.classList.remove('hidden');
-  const u = coverURLs.get(t.albumKey);
+  const u = coverURLs.get(ckey(t));
   const bg = u ? `url("${u}")` : `linear-gradient(135deg,hsl(${hue(t.albumKey)} 50% 40%),hsl(${(hue(t.albumKey) + 50) % 360} 55% 20%))`;
   $('#plCover').style.backgroundImage = bg; $('#fpCover').style.backgroundImage = bg;
   $('#plTitle').innerHTML = `<a data-href="#/album/${enc(t.albumKey)}">${esc(t.title)}</a>`;
@@ -743,7 +833,7 @@ async function updateNowPlaying() {
   updateLikeButtons(); updateMediaSession();
   if (LY.open && LY.track !== t) renderLyrics(t);
   document.title = `${t.title} · ${t.artist}`;
-  const c = await colorOf(t.albumKey);
+  const c = await colorOf(ckey(t));
   if (P.cur !== t) return;
   $('#fpBg').style.background = `linear-gradient(rgb(${c}) 0%, rgb(${c.map(v => v * .45 | 0)}) 55%, #0c0c0f 100%)`;
   pl.style.setProperty('--mini-bg', `rgb(${c.map(v => v * .62 | 0)})`);
@@ -844,7 +934,7 @@ window.addEventListener('offline', () => { document.body.classList.add('offline'
    ========================================================= */
 const plTracks = pl => (pl?.ids || []).map(id => L.byId.get(id)).filter(Boolean);
 function plCover(pl, cls = '') {
-  const keys = [...new Set(plTracks(pl).map(t => t.albumKey))].filter(k => coverURLs.has(k));
+  const keys = [...new Set(plTracks(pl).map(ckey))].filter(k => coverURLs.has(k));
   if (keys.length >= 4) return `<span class="cv mosaic ${cls}">${keys.slice(0, 4).map(k => `<i style="background-image:url(&quot;${coverURLs.get(k)}&quot;)"></i>`).join('')}</span>`;
   if (keys.length) return cv(keys[0], cls);
   const h = hue(pl.id);
@@ -1060,7 +1150,7 @@ async function renderLyrics(t) {
   LY.track = t; LY.lines = null; LY.idx = -1;
   const body = $('#lyricsBody');
   $('#lyTitle').textContent = t.title; $('#lyArtist').textContent = t.artist;
-  colorOf(t.albumKey).then(c => { if (LY.track === t) $('#lyrics').style.background = `linear-gradient(rgb(${c}), rgb(${c.map(v => v * .4 | 0)}) 70%, #0c0c0f)`; });
+  colorOf(ckey(t)).then(c => { if (LY.track === t) $('#lyrics').style.background = `linear-gradient(rgb(${c}), rgb(${c.map(v => v * .4 | 0)}) 70%, #0c0c0f)`; });
   body.innerHTML = '<p class="ly-msg">Buscando la letra…</p>';
   const r = await getLyrics(t);
   if (LY.track !== t) return;
@@ -1119,7 +1209,7 @@ function trackRows(tracks, { album = false, covers = true, ctx = '' } = {}) {
     const q = variantFor(t, settings.quality);
     return `<div class="tr${P.cur?.id === t.id ? ' playing' : ''}${isDl(t) ? ' dl' : ''}" data-i="${i}" data-id="${esc(t.id)}">
       <div class="n"><span class="num">${album ? (t.trackNo || i + 1) : i + 1}</span><span class="pi">${icon('play')}</span><span class="eq"><span></span><span></span><span></span></span></div>
-      <div class="t-main">${covers ? cv(t.albumKey, '', 'note') : ''}<div class="t-text"><div class="t-title">${esc(t.title)}</div><div class="t-sub"><span class="t-dl" title="Descargada">${icon('downloaded')}</span><a data-href="#/artist/${enc(t.artistKey)}">${esc(t.artist)}</a></div></div></div>
+      <div class="t-main">${covers ? cvT(t) : ''}<div class="t-text"><div class="t-title">${esc(t.title)}</div><div class="t-sub"><span class="t-dl" title="Descargada">${icon('downloaded')}</span><a data-href="#/artist/${enc(t.artistKey)}">${esc(t.artist)}</a></div></div></div>
       <div class="t-alb"><a data-href="#/album/${enc(t.albumKey)}">${esc(t.album)}</a></div>
       <div class="t-q ${q.lossless ? 'hi' : ''}" title="${esc(q.qLong)}${(t.variants || []).length > 1 ? ' · ' + t.variants.length + ' versiones' : ''}">${esc(q.qShort || '')}</div>
       <div class="t-dur"><button class="t-like${on ? ' on' : ''}" data-like="${esc(t.id)}" aria-label="Me gusta">${icon(on ? 'heartFill' : 'heart')}</button><span class="dur">${t.duration ? fmtTime(t.duration) : '–'}</span><button class="t-more" data-more="${esc(t.id)}" aria-label="Más opciones">${icon('more')}</button></div>
@@ -1254,7 +1344,7 @@ function renderPlaylist(id) {
   const k = getSort('pl.' + id, 'custom');
   const songs = sortTracks(plTracks(pl), k);
   const total = songs.reduce((s, t) => s + (t.duration || 0), 0);
-  const firstKey = songs.find(t => coverURLs.has(t.albumKey))?.albumKey;
+  const firstKey = ckey(songs.find(t => coverURLs.has(ckey(t))));
   const color = (firstKey && coverColors.get(firstKey)) || hslToRgb(hue(pl.id), .45, .3);
   if (firstKey) tintHeader(firstKey);
   return `<div>${headerBlock({ coverHTML: plCover(pl), kind: 'Lista', title: pl.name, color, sub: `${songs.length} canciones${total ? ', ' + fmtLong(total) : ''}` })}
@@ -1478,7 +1568,7 @@ function askReconnect(msg) {
 function openSettings() {
   $('#setFolder').value = store.get('folder', '') || CFG.MUSIC_FOLDER || '';
   $('#setQuality').value = settings.quality; $('#setDlQuality').value = settings.dlQuality;
-  $('#setDJ').checked = DJ.on; $('#setDJFade').value = DJ.fade; $('#setDJFadeVal').textContent = DJ.fade + ' s'; $('#setDJEndless').checked = DJ.endless;
+  $('#setAutoCovers').checked = autoCoversOn(); $('#setDJ').checked = DJ.on; $('#setDJFade').value = DJ.fade; $('#setDJFadeVal').textContent = DJ.fade + ' s'; $('#setDJEndless').checked = DJ.endless;
   const at = L.raw?.at ? new Date(L.raw.at).toLocaleString() : '—';
   $('#setInfo').innerHTML = mode === 'demo' ? 'Modo demostración. Cierra sesión para conectar tu Google Drive.' : `${L.tracks.length} canciones · ${L.albums.size} álbumes · ${L.artists.size} artistas<br>Último escaneo: ${esc(at)}`;
   $('#setRescan').style.display = mode === 'demo' ? 'none' : '';
@@ -1497,6 +1587,7 @@ $('#setQuality').addEventListener('change', e => {
   settings.quality = e.target.value; store.set('quality', settings.quality);
   buildLibrary(L.all); rerender(true); toast(settings.quality === 'max' ? 'Calidad máxima activada' : 'Ahorro de datos activado');
 });
+$('#setAutoCovers').addEventListener('change', e => { store.set('autoCovers', e.target.checked); if (e.target.checked) { store.set('cvmiss', {}); onlineCovers(); toast('Buscando carátulas…'); } });
 $('#setDJ').addEventListener('change', e => { if (e.target.checked !== DJ.on) toggleDJ(); });
 $('#setDJFade').addEventListener('input', e => { DJ.fade = +e.target.value; store.set('djFade', DJ.fade); $('#setDJFadeVal').textContent = DJ.fade + ' s'; });
 $('#setDJEndless').addEventListener('change', e => { DJ.endless = e.target.checked; store.set('djEndless', DJ.endless); });
