@@ -3,7 +3,8 @@
 // 2) Transmite el audio desde Google Drive en su calidad original: añade tu token a cada
 //    petición y deja pasar las peticiones "Range" para que puedas adelantar la canción sin descargarla completa.
 
-const VERSION = 'sonora-v1';
+const VERSION = 'sonora-v2';
+const AUDIO_CACHE = 'sonora-audio'; // descargas: nunca se borra al actualizar
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'icons.js', 'tags.js', 'demo.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -11,7 +12,7 @@ self.addEventListener('install', e => {
 });
 self.addEventListener('activate', e => {
   e.waitUntil((async () => {
-    for (const k of await caches.keys()) if (k !== VERSION) await caches.delete(k);
+    for (const k of await caches.keys()) if (k.startsWith('sonora-v') && k !== VERSION) await caches.delete(k);
     await self.clients.claim();
   })());
 });
@@ -31,7 +32,24 @@ function tokenFromDB() {
   });
 }
 
+// Respuesta parcial (206) desde una canción descargada, para poder adelantar sin internet
+async function fromDownload(res, req) {
+  const range = req.headers.get('range');
+  const type = res.headers.get('content-type') || 'audio/mpeg';
+  const blob = await res.blob(); const size = blob.size;
+  if (!range) return new Response(blob, { status: 200, headers: { 'Content-Type': type, 'Content-Length': String(size), 'Accept-Ranges': 'bytes' } });
+  const m = /bytes=(\d*)-(\d*)/.exec(range) || [];
+  let start, end;
+  if (m[1] === '' && m[2]) { start = Math.max(0, size - +m[2]); end = size - 1; }
+  else { start = +m[1] || 0; end = m[2] ? Math.min(+m[2], size - 1) : size - 1; }
+  if (start >= size) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
+  return new Response(blob.slice(start, end + 1, type), { status: 206, headers: { 'Content-Type': type, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(end - start + 1), 'Accept-Ranges': 'bytes' } });
+}
+
 async function stream(id, req) {
+  const u = new URL(req.url);
+  const hit = await caches.match(u.origin + u.pathname); // busca en las descargas de cualquier perfil
+  if (hit) return fromDownload(hit, req);
   const go = token => {
     const h = new Headers({ Authorization: 'Bearer ' + token });
     const range = req.headers.get('range'); if (range) h.set('Range', range);

@@ -44,7 +44,9 @@
       <div class="topbar-title" id="topTitle"></div>
       <div class="topbar-actions">
         <span class="scan-status" id="scanStatus"></span>
+        <button class="round" id="btnScan" aria-label="Escanear música" title="Buscar canciones nuevas en Drive"><i data-icon="refresh"></i></button>
         <button class="round" id="btnSettings" aria-label="Ajustes"><i data-icon="settings"></i></button>
+        <button class="round profile-btn" id="btnProfile" aria-label="Perfil"></button>
       </div>
     </header>
     <div class="view" id="view"></div>
@@ -139,11 +141,28 @@
       </div>
       <label class="field">
         <span>Carpeta de música en Drive</span>
-        <input id="setFolder" placeholder="Vacío = buscar en todo mi Drive  (ej. Musica)">
-        <small>Solo se mostrarán canciones dentro de una carpeta con este nombre.</small>
+        <input id="setFolder" placeholder="Enlace de la carpeta o su nombre (vacío = todo mi Drive)">
+        <small>Pega el enlace de tu carpeta de Drive (drive.google.com/drive/folders/…) o escribe su nombre.</small>
+      </label>
+      <label class="field">
+        <span>Calidad de reproducción</span>
+        <select id="setQuality">
+          <option value="max">Máxima: archivo original (FLAC / sin pérdida si existe)</option>
+          <option value="saver">Ahorro de datos: versión más ligera si hay duplicados</option>
+        </select>
+        <small>La app nunca comprime el audio: reproduce el archivo tal cual está en tu Drive. Si tienes la misma canción en FLAC y MP3, aquí eliges cuál usar.</small>
+      </label>
+      <label class="field">
+        <span>Calidad de descargas</span>
+        <select id="setDlQuality">
+          <option value="max">Máxima: archivo original</option>
+          <option value="saver">Ahorro de espacio: versión más ligera si hay duplicados</option>
+        </select>
+        <small id="setDlInfo"></small>
       </label>
       <div class="modal-actions">
         <button class="btn" id="setRescan"><i data-icon="refresh"></i> Volver a escanear</button>
+        <button class="btn ghost" id="setClearDl"><i data-icon="trash"></i> Borrar descargas</button>
         <button class="btn ghost" id="setLogout">Cerrar sesión</button>
       </div>
       <p class="muted small" id="setInfo"></p>
@@ -160,8 +179,34 @@
       <button class="btn primary big" id="btnLogin"><i data-icon="drive"></i> Conectar Google Drive</button>
       <button class="btn ghost" id="btnDemo">Probar con música de demostración</button>
       <p class="muted small" id="loginNote"></p>
+      <button class="link-btn" id="loginProfile"></button>
     </div>
   </section>
+
+  <!-- Selector de perfiles -->
+  <section class="profiles" id="profiles">
+    <button class="icon-btn profiles-close" id="profilesClose" aria-label="Cerrar"><i data-icon="close"></i></button>
+    <h1 id="profilesTitle">¿Quién está escuchando?</h1>
+    <div class="profiles-grid" id="profilesGrid"></div>
+    <button class="btn ghost" id="profilesManage">Administrar perfiles</button>
+  </section>
+
+  <!-- Menú de canción -->
+  <div class="menu-shade" id="menuShade"></div>
+  <div class="menu" id="menu" role="menu"></div>
+
+  <!-- Diálogo (nombres de listas, confirmaciones) -->
+  <div class="modal" id="dialog" aria-hidden="true">
+    <div class="modal-card small-card">
+      <h3 id="dlgTitle"></h3>
+      <p class="muted" id="dlgText"></p>
+      <div class="field"><input id="dlgInput" maxlength="80"></div>
+      <div class="modal-actions end">
+        <button class="btn ghost" id="dlgCancel">Cancelar</button>
+        <button class="btn primary" id="dlgOk">Aceptar</button>
+      </div>
+    </div>
+  </div>
 
   <div class="toast" id="toast"></div>
 </div>
