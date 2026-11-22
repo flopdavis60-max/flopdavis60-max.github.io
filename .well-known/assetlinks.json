@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "io.github.flopdavis60_max.twa",
+      "sha256_cert_fingerprints": [
+        "26:BA:4E:6B:39:76:AC:E3:7D:75:D6:4A:03:0A:42:43:2F:0E:D6:82:A2:3D:42:F2:8F:FA:8F:F2:E3:B2:6C:0C"
+      ]
+    }
+  }
+]
