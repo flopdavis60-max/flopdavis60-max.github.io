@@ -3,12 +3,12 @@
 // 2) Transmite el audio desde Google Drive en su calidad original: añade tu token a cada
 //    petición y deja pasar las peticiones "Range" para que puedas adelantar la canción sin descargarla completa.
 
-const VERSION = 'sonora-v7';
+const VERSION = 'sonora-v8';
 const AUDIO_CACHE = 'sonora-audio'; // descargas: nunca se borra al actualizar
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'icons.js', 'tags.js', 'demo.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', e => {
   e.waitUntil((async () => {
@@ -71,7 +71,7 @@ self.addEventListener('fetch', e => {
     // y se actualiza en segundo plano para la próxima vez.
     e.respondWith((async () => {
       const cached = await caches.match('index.html') || await caches.match('./');
-      const net = fetch(e.request).then(r => { if (r.ok) { const c = r.clone(); caches.open(VERSION).then(ca => ca.put('index.html', c)); } return r; });
+      const net = fetch(e.request, { cache: 'no-cache' }).then(r => { if (r.ok) { const c = r.clone(); caches.open(VERSION).then(ca => ca.put('index.html', c)); } return r; });
       if (cached) { e.waitUntil(net.catch(() => { })); return cached; }
       try { return await Promise.race([net, new Promise((_, rej) => setTimeout(() => rej(new Error('lento')), 6000))]); }
       catch { return (await caches.match('index.html')) || new Response('<h1>Sonora</h1><p>Sin conexión. Abre la app con internet una vez para poder usarla sin conexión.</p>', { headers: { 'Content-Type': 'text/html; charset=utf-8' } }); }
@@ -79,7 +79,7 @@ self.addEventListener('fetch', e => {
     return;
   }
   e.respondWith(caches.match(e.request, { ignoreSearch: true }).then(hit => {
-    const net = fetch(e.request).then(r => { if (r.ok) { const c = r.clone(); caches.open(VERSION).then(ca => ca.put(e.request, c)); } return r; }).catch(() => hit);
+    const net = fetch(e.request, { cache: 'no-cache' }).then(r => { if (r.ok) { const c = r.clone(); caches.open(VERSION).then(ca => ca.put(e.request, c)); } return r; }).catch(() => hit);
     return hit || net;
   }));
 });

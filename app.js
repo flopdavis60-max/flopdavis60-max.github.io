@@ -801,6 +801,7 @@ onA('error', () => {
 // Al volver el internet, retoma donde se quedó
 window.addEventListener('online', () => { if (P.waitNet && P.needsLoad && P.cur) { P.waitNet = false; loadCurrent(true, P.resumeAt); } });
 
+const APP_VERSION = 'v8';
 /* ---------- Media Session (controles en la pantalla bloqueada / notificación) ---------- */
 // En la app nativa de Android (WebView) no existe navigator.mediaSession: lo creamos y lo
 // conectamos con la notificación nativa (título, artista, carátula y botones de la pantalla bloqueada)
@@ -856,8 +857,21 @@ function updateMediaSession() {
   set(cached || null);
   if (!cached && coverURLs.has(key)) artDataURL(key).then(u => { if (u && P.cur === t) set(u); });
   updatePlaybackState();
+  nativeMeta(t, key);
+}
+// App nativa de Android: enviar la canción directo a la notificación / pantalla bloqueada
+let nativeArtKey = null;
+function nativeMeta(t, key) {
+  const N = window.SonoraNative; if (!N) return;
+  try { N.metadata(t.title || '', t.artist || '', t.album || ''); } catch { }
+  if (nativeArtKey === key) return;
+  nativeArtKey = key;
+  const send = u => { try { if (u && nativeArtKey === key) N.artwork(u); } catch { } };
+  if (coverURLs.has(key)) artDataURL(key).then(send);
+  else fetch('icons/icon-512.png').then(r => r.blob()).then(b => new Promise(res => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(b); })).then(send).catch(() => { });
 }
 function updatePlaybackState() {
+  try { const N = window.SonoraNative; if (N) N.state(audios.some(a => !a.paused && !a.ended), audio.currentTime || 0, isFinite(audio.duration) ? audio.duration : 0); } catch { }
   try { if ('mediaSession' in navigator) navigator.mediaSession.playbackState = !P.cur ? 'none' : audios.some(a => !a.paused && !a.ended) ? 'playing' : 'paused'; } catch { }
 }
 function updatePositionState() {
@@ -1730,7 +1744,7 @@ function openSettings() {
   $('#setQuality').value = settings.quality; $('#setDlQuality').value = settings.dlQuality;
   $('#setAutoCovers').checked = autoCoversOn(); $('#setDJ').checked = DJ.on; $('#setDJFade').value = DJ.fade; $('#setDJFadeVal').textContent = DJ.fade + ' s'; $('#setDJEndless').checked = DJ.endless;
   const at = L.raw?.at ? new Date(L.raw.at).toLocaleString() : '—';
-  $('#setInfo').innerHTML = mode === 'demo' ? 'Modo demostración. Cierra sesión para conectar tu Google Drive.' : `${L.tracks.length} canciones · ${L.albums.size} álbumes · ${L.artists.size} artistas<br>Último escaneo: ${esc(at)}`;
+  $('#setInfo').innerHTML = (mode === 'demo' ? 'Modo demostración. Cierra sesión para conectar tu Google Drive.' : `${L.tracks.length} canciones · ${L.albums.size} álbumes · ${L.artists.size} artistas<br>Último escaneo: ${esc(at)}`) + `<br><span class="muted small">Versión ${APP_VERSION}${window.SonoraNative ? ' · app nativa' : ''}</span>`;
   $('#setRescan').style.display = mode === 'demo' ? 'none' : '';
   $('#setDlInfo').textContent = `${downloaded.size} canciones descargadas`;
   storageInfo().then(t => { if (t) $('#setDlInfo').textContent = `${downloaded.size} canciones descargadas · ${t}`; });
@@ -1894,3 +1908,18 @@ init().catch(e => { softError(e); try { render(); } catch { } });
 
 // Exponer para depuración
 window.sonora = { L, P, DJ, auth, PROFILES };
+
+/* ---------- Botones de la notificación / pantalla bloqueada (app nativa de Android) ---------- */
+if (window.SonoraNative) {
+  window.__sonoraAction = (a, arg) => {
+    try {
+      if (a === 'play') { if (audio.paused) togglePlay(); }
+      else if (a === 'pause' || a === 'stop') { if (!audio.paused) togglePlay(); }
+      else if (a === 'nexttrack') next();
+      else if (a === 'previoustrack') prev();
+      else if (a === 'seekto' && isFinite(audio.duration)) { audio.currentTime = Math.max(0, Math.min(+arg || 0, audio.duration)); updatePositionState(); }
+      else if (a === 'seekforward') audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + (+arg || 10));
+      else if (a === 'seekbackward') audio.currentTime = Math.max(0, audio.currentTime - (+arg || 10));
+    } catch { }
+  };
+}
