@@ -802,6 +802,37 @@ onA('error', () => {
 window.addEventListener('online', () => { if (P.waitNet && P.needsLoad && P.cur) { P.waitNet = false; loadCurrent(true, P.resumeAt); } });
 
 /* ---------- Media Session (controles en la pantalla bloqueada / notificación) ---------- */
+// En la app nativa de Android (WebView) no existe navigator.mediaSession: lo creamos y lo
+// conectamos con la notificación nativa (título, artista, carátula y botones de la pantalla bloqueada)
+if (window.SonoraNative && !('mediaSession' in navigator)) {
+  const N = window.SonoraNative, H = {};
+  if (!window.MediaMetadata) window.MediaMetadata = class { constructor(o = {}) { this.title = o.title || ''; this.artist = o.artist || ''; this.album = o.album || ''; this.artwork = o.artwork || []; } };
+  let meta = null, lastArt = '';
+  const toData = async src => {
+    if (src.startsWith('data:')) return src;
+    const img = await createImageBitmap(await (await fetch(src)).blob());
+    const c = document.createElement('canvas'), S = 512; c.width = S; c.height = S;
+    const k = Math.max(S / img.width, S / img.height); c.getContext('2d').drawImage(img, (S - img.width * k) / 2, (S - img.height * k) / 2, img.width * k, img.height * k);
+    return c.toDataURL('image/jpeg', 0.86);
+  };
+  const ms = {
+    playbackState: 'none',
+    get metadata() { return meta; },
+    set metadata(m) {
+      meta = m; if (!m) return;
+      try { N.metadata(m.title || '', m.artist || '', m.album || ''); } catch { }
+      const src = m.artwork?.length ? m.artwork[m.artwork.length - 1].src : '';
+      if (src && src !== lastArt) { lastArt = src; toData(src).then(d => { if (src === lastArt) N.artwork(d); }).catch(() => { }); }
+    },
+    setActionHandler(a, f) { H[a] = f; },
+    setPositionState(st) { try { if (st) N.position(+st.duration || 0, +st.position || 0, +st.playbackRate || 1); } catch { } },
+  };
+  try { Object.defineProperty(navigator, 'mediaSession', { value: ms, configurable: true }); } catch { }
+  window.__sonoraAction = (a, arg) => {
+    const f = H[a]; if (!f) return;
+    try { f(a === 'seekto' ? { action: a, seekTime: arg } : { action: a, seekOffset: arg || 10 }); } catch { }
+  };
+}
 // La pantalla bloqueada y la notificación cargan mejor la carátula como imagen JPEG incrustada (no como blob:)
 const artCache = new Map();
 async function artDataURL(key) {
