@@ -802,10 +802,32 @@ onA('error', () => {
 window.addEventListener('online', () => { if (P.waitNet && P.needsLoad && P.cur) { P.waitNet = false; loadCurrent(true, P.resumeAt); } });
 
 /* ---------- Media Session (controles en la pantalla bloqueada / notificación) ---------- */
+// La pantalla bloqueada y la notificación cargan mejor la carátula como imagen JPEG incrustada (no como blob:)
+const artCache = new Map();
+async function artDataURL(key) {
+  if (artCache.has(key)) return artCache.get(key);
+  const src = coverURLs.get(key); if (!src) return null;
+  try {
+    const img = await createImageBitmap(await (await fetch(src)).blob());
+    const c = document.createElement('canvas'), S = 512; c.width = S; c.height = S;
+    const k = Math.max(S / img.width, S / img.height), w = img.width * k, h = img.height * k;
+    c.getContext('2d').drawImage(img, (S - w) / 2, (S - h) / 2, w, h);
+    const url = c.toDataURL('image/jpeg', 0.86);
+    if (artCache.size > 40) artCache.delete(artCache.keys().next().value);
+    artCache.set(key, url); return url;
+  } catch { return null; }
+}
 function updateMediaSession() {
   if (!('mediaSession' in navigator) || !P.cur) return;
-  const t = P.cur; const art = coverURLs.get(ckey(t));
-  navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist, album: t.album, artwork: art ? [{ src: art, sizes: '512x512' }] : [{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }] });
+  const t = P.cur, key = ckey(t);
+  const set = art => { try { navigator.mediaSession.metadata = new MediaMetadata({ title: t.title, artist: t.artist, album: t.album, artwork: art ? [{ src: art, sizes: '512x512', type: 'image/jpeg' }] : [{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }] }); } catch { } };
+  const cached = artCache.get(key);
+  set(cached || null);
+  if (!cached && coverURLs.has(key)) artDataURL(key).then(u => { if (u && P.cur === t) set(u); });
+  updatePlaybackState();
+}
+function updatePlaybackState() {
+  try { if ('mediaSession' in navigator) navigator.mediaSession.playbackState = !P.cur ? 'none' : audios.some(a => !a.paused && !a.ended) ? 'playing' : 'paused'; } catch { }
 }
 function updatePositionState() {
   try { if ('mediaSession' in navigator && isFinite(audio.duration)) navigator.mediaSession.setPositionState({ duration: audio.duration, position: Math.min(audio.currentTime, audio.duration), playbackRate: audio.playbackRate }); } catch { }
@@ -813,7 +835,7 @@ function updatePositionState() {
 if ('mediaSession' in navigator) {
   const ms = navigator.mediaSession;
   const h = (a, f) => { try { ms.setActionHandler(a, f); } catch { } };
-  h('play', () => togglePlay()); h('pause', () => audio.pause());
+  h('play', () => { if (audio.paused) togglePlay(); }); h('pause', () => { if (!audio.paused) togglePlay(); }); h('stop', () => { if (!audio.paused) togglePlay(); });
   h('previoustrack', prev); h('nexttrack', () => next());
   h('seekto', d => { audio.currentTime = d.seekTime; updatePositionState(); });
   h('seekbackward', d => { audio.currentTime = Math.max(0, audio.currentTime - (d.seekOffset || 10)); });
@@ -860,6 +882,7 @@ function setProgress(cur, d) {
 }
 function updatePlayState() {
   const playing = !audio.paused;
+  updatePlaybackState();
   for (const b of ['#btnPlay', '#btnPlayMini', '#fpPlay']) setIcon($(b), playing ? 'pause' : 'play');
   document.body.classList.toggle('paused', !playing);
   $$('[data-play-btn]').forEach(b => setIcon(b, playing && P.ctx === b.dataset.playBtn ? 'pause' : 'play'));
