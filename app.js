@@ -150,7 +150,10 @@ const saveDl = () => store.set('dl', [...downloaded]);
 const settings = { quality: store.get('quality', 'max'), dlQuality: store.get('dlQuality', 'max') };
 const AUDIO_CACHE = 'sonora-audio-' + PID;
 const streamUrl = id => new URL('stream/' + id, location.href).href.split('#')[0].split('?')[0];
-const MIME = { flac: 'audio/flac', mp3: 'audio/mpeg', m4a: 'audio/mp4', mp4a: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', wav: 'audio/wav', webm: 'audio/webm' };
+const MIME = { flac: 'audio/flac', mp3: 'audio/mpeg', m4a: 'audio/mp4', mp4a: 'audio/mp4', alac: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', wav: 'audio/wav', aif: 'audio/aiff', aiff: 'audio/aiff', webm: 'audio/webm' };
+// iPhone (WebKit) exige el tipo de audio correcto; Drive a veces lo entrega como "application/octet-stream"
+const streamSrc = v => `stream/${v.id}` + (MIME[v.ext] ? `?t=${encodeURIComponent(MIME[v.ext])}` : '');
+const typedBlob = (b, ext) => MIME[ext] && b.type !== MIME[ext] ? new Blob([b], { type: MIME[ext] }) : b;
 
 /* ---------- Carpeta de música: nombre o enlace de Drive ---------- */
 function folderRule() {
@@ -599,14 +602,14 @@ async function srcFor(t) {
   if (t.demo) src = await renderDemoAudio(t);
   else if (downloaded.has(v.id)) {
     await swReady;
-    if (navigator.serviceWorker?.controller) src = `stream/${v.id}`;
-    else { const r = await (await caches.open(AUDIO_CACHE)).match(streamUrl(v.id)); src = URL.createObjectURL(await r.blob()); }
+    if (navigator.serviceWorker?.controller && !t.blobOnly) src = streamSrc(v);
+    else { const r = await (await caches.open(AUDIO_CACHE)).match(streamUrl(v.id)); src = URL.createObjectURL(typedBlob(await r.blob(), v.ext)); }
   } else {
     if (!navigator.onLine) throw new Error('offline');
     if (!auth.valid()) await auth.request('');
     await swReady;
-    if (navigator.serviceWorker?.controller) { swPost({ type: 'token', token: auth.token }); src = `stream/${v.id}`; }
-    else src = URL.createObjectURL(await (await gfetch(`${API}/${v.id}?alt=media&supportsAllDrives=true`)).blob());
+    if (navigator.serviceWorker?.controller && !t.blobOnly) { swPost({ type: 'token', token: auth.token }); src = streamSrc(v); }
+    else src = URL.createObjectURL(typedBlob(await (await gfetch(`${API}/${v.id}?alt=media&supportsAllDrives=true`)).blob(), v.ext));
   }
   return { src, v };
 }
@@ -794,14 +797,28 @@ onA('error', () => {
     toast('Sin conexión. La música seguirá cuando vuelva el internet.'); updatePlayState(); return;
   }
   if (!auth.valid()) { P.needsLoad = true; P.resumeAt = at; askReconnect('Tu sesión de Google expiró.'); return; }
-  const code = audio.error?.code;
-  toast(code === 4 ? 'Este formato no se puede reproducir en este dispositivo. Saltando…' : 'Error al reproducir. Saltando…');
-  setTimeout(() => next(true), 1500);
+  const code = audio.error?.code, t = P.cur, v = P.playing || t;
+  // Plan B: si el streaming falla, descargar la canción completa y reproducirla desde la memoria
+  if (t && !t.blobOnly && audio.src.includes('stream/')) {
+    t.blobOnly = true; toast('Cargando la canción completa…');
+    return loadCurrent(true, at);
+  }
+  playDiag(code, v);
+  toast(code === 4 ? `Este formato (.${v?.ext || '?'}) no se puede reproducir en este dispositivo. Saltando…` : 'Error al reproducir. Saltando…');
+  setTimeout(() => next(true), 1800);
 });
 // Al volver el internet, retoma donde se quedó
 window.addEventListener('online', () => { if (P.waitNet && P.needsLoad && P.cur) { P.waitNet = false; loadCurrent(true, P.resumeAt); } });
 
-const APP_VERSION = 'v8';
+const APP_VERSION = 'v9';
+// Diagnóstico del último error de reproducción (se ve en Ajustes)
+let lastPlayErr = '';
+async function playDiag(code, v) {
+  let http = '';
+  try { const r = await fetch(`${API}/${v.id}?alt=media&supportsAllDrives=true`, { headers: { Authorization: 'Bearer ' + auth.token, Range: 'bytes=0-3' } }); const b = new Uint8Array(await r.arrayBuffer()); http = `${r.status} ${r.headers.get('content-type') || ''} ${String.fromCharCode(...b).replace(/[^\x20-\x7e]/g, '.')}`; } catch (e) { http = 'fetch: ' + e.message; }
+  lastPlayErr = `código ${code} · .${v?.ext} · ${v?.codec || ''} · SW ${navigator.serviceWorker?.controller ? 'sí' : 'no'} · Drive ${http}`;
+  console.warn('Sonora', lastPlayErr);
+}
 /* ---------- Media Session (controles en la pantalla bloqueada / notificación) ---------- */
 // En la app nativa de Android (WebView) no existe navigator.mediaSession: lo creamos y lo
 // conectamos con la notificación nativa (título, artista, carátula y botones de la pantalla bloqueada)
@@ -1744,7 +1761,7 @@ function openSettings() {
   $('#setQuality').value = settings.quality; $('#setDlQuality').value = settings.dlQuality;
   $('#setAutoCovers').checked = autoCoversOn(); $('#setDJ').checked = DJ.on; $('#setDJFade').value = DJ.fade; $('#setDJFadeVal').textContent = DJ.fade + ' s'; $('#setDJEndless').checked = DJ.endless;
   const at = L.raw?.at ? new Date(L.raw.at).toLocaleString() : '—';
-  $('#setInfo').innerHTML = (mode === 'demo' ? 'Modo demostración. Cierra sesión para conectar tu Google Drive.' : `${L.tracks.length} canciones · ${L.albums.size} álbumes · ${L.artists.size} artistas<br>Último escaneo: ${esc(at)}`) + `<br><span class="muted small">Versión ${APP_VERSION}${window.SonoraNative ? ' · app nativa' : ''}</span>`;
+  $('#setInfo').innerHTML = (mode === 'demo' ? 'Modo demostración. Cierra sesión para conectar tu Google Drive.' : `${L.tracks.length} canciones · ${L.albums.size} álbumes · ${L.artists.size} artistas<br>Último escaneo: ${esc(at)}`) + `<br><span class="muted small">Versión ${APP_VERSION}${window.SonoraNative ? ' · app nativa' + (window.SonoraNative.platform === 'ios' ? ' iPhone' : '') : ''}${lastPlayErr ? '<br>Último error: ' + esc(lastPlayErr) : ''}</span>`;
   $('#setRescan').style.display = mode === 'demo' ? 'none' : '';
   $('#setDlInfo').textContent = `${downloaded.size} canciones descargadas`;
   storageInfo().then(t => { if (t) $('#setDlInfo').textContent = `${downloaded.size} canciones descargadas · ${t}`; });

@@ -3,7 +3,7 @@
 // 2) Transmite el audio desde Google Drive en su calidad original: añade tu token a cada
 //    petición y deja pasar las peticiones "Range" para que puedas adelantar la canción sin descargarla completa.
 
-const VERSION = 'sonora-v8';
+const VERSION = 'sonora-v9';
 const AUDIO_CACHE = 'sonora-audio'; // descargas: nunca se borra al actualizar
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'icons.js', 'tags.js', 'demo.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
@@ -35,7 +35,7 @@ function tokenFromDB() {
 // Respuesta parcial (206) desde una canción descargada, para poder adelantar sin internet
 async function fromDownload(res, req) {
   const range = req.headers.get('range');
-  const type = res.headers.get('content-type') || 'audio/mpeg';
+  const type = new URL(req.url).searchParams.get('t') || res.headers.get('content-type') || 'audio/mpeg';
   const blob = await res.blob(); const size = blob.size;
   if (!range) return new Response(blob, { status: 200, headers: { 'Content-Type': type, 'Content-Length': String(size), 'Accept-Ranges': 'bytes' } });
   const m = /bytes=(\d*)-(\d*)/.exec(range) || [];
@@ -58,6 +58,12 @@ async function stream(id, req) {
   let token = TOKEN || (TOKEN = await tokenFromDB());
   let r = await go(token);
   if (r.status === 401) { const t2 = await tokenFromDB(); if (t2 && t2 !== token) { TOKEN = t2; r = await go(t2); } }
+  // iPhone (WebKit) no reproduce si el tipo llega como "application/octet-stream": se corrige con la extensión
+  const want = u.searchParams.get('t');
+  if (r.ok && want && !/^(audio|video)\//.test(r.headers.get('content-type') || '')) {
+    const h = new Headers(r.headers); h.set('Content-Type', want);
+    return new Response(r.body, { status: r.status, statusText: r.statusText, headers: h });
+  }
   return r;
 }
 
