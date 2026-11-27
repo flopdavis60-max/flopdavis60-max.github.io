@@ -153,7 +153,7 @@ let playlists = store.get('playlists', []);
 const savePlaylists = () => { store.set('playlists', playlists); renderSidebar(); };
 let downloaded = new Set(store.get('dl', []));
 const saveDl = () => store.set('dl', [...downloaded]);
-const settings = { quality: store.get('quality', 'max'), dlQuality: store.get('dlQuality', 'max'), cellSaver: store.get('cellSaver', false) };
+const settings = { quality: store.get('quality', 'max'), dlQuality: store.get('dlQuality', 'max'), cellSaver: store.get('cellSaver', false), headset: store.get('headset', true) };
 /* ---------- Red: WiFi o datos móviles (para el ahorro de datos opcional) ---------- */
 function netType() {
   try { const N = window.SonoraNative; if (N && typeof N.netType === 'function') { const t = N.netType(); if (t) return String(t); } } catch { }
@@ -713,6 +713,26 @@ function prev() {
   if (audio.currentTime > 3) { audio.currentTime = 0; return; }
   P.pos = Math.max(0, P.pos - 1); loadCurrent(true);
 }
+/* ---------- Controles de audífonos: 1 toque pausa · 2 toques repite la canción · 3 toques canción anterior ---------- */
+function restartTrack() {
+  if (!P.cur) return;
+  finishMix();
+  if (P.needsLoad) return loadCurrent(true, 0);
+  audio.currentTime = 0; updatePositionState();
+  if (audio.paused) audio.play().catch(() => { });
+  toast('Repitiendo la canción');
+}
+function prevTrack() {
+  if (!P.queue.length) return;
+  finishMix();
+  if (P.pos === 0) return restartTrack();
+  P.pos = P.pos - 1; loadCurrent(true);
+}
+// En iPhone (y Android sin la app nativa) el sistema no distingue los audífonos de la pantalla bloqueada
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const hsRemap = () => settings.headset && (isIOS || window.SonoraNative?.platform === 'ios' || (/Android/.test(navigator.userAgent) && !window.SonoraNative));
+const onNextCmd = () => hsRemap() ? restartTrack() : next();
+const onPrevCmd = () => hsRemap() ? prevTrack() : prev();
 
 /* ---------- Modo DJ: transición cruzada entre canciones ---------- */
 async function startMix(manual = false) {
@@ -827,7 +847,7 @@ onA('error', () => {
 // Al volver el internet, retoma donde se quedó
 window.addEventListener('online', () => { if (P.waitNet && P.needsLoad && P.cur) { P.waitNet = false; loadCurrent(true, P.resumeAt); } });
 
-const APP_VERSION = 'v10';
+const APP_VERSION = 'v11';
 /* ---------- Reproducción continua: vigilante de cortes y precarga de la siguiente canción ---------- */
 let wdT = -1, wdN = 0;
 setInterval(() => {
@@ -951,7 +971,7 @@ if ('mediaSession' in navigator) {
   const ms = navigator.mediaSession;
   const h = (a, f) => { try { ms.setActionHandler(a, f); } catch { } };
   h('play', () => { if (audio.paused) togglePlay(); }); h('pause', () => { if (!audio.paused) togglePlay(); }); h('stop', () => { if (!audio.paused) togglePlay(); });
-  h('previoustrack', prev); h('nexttrack', () => next());
+  h('previoustrack', () => onPrevCmd()); h('nexttrack', () => onNextCmd());
   h('seekto', d => { audio.currentTime = d.seekTime; updatePositionState(); });
   h('seekbackward', d => { audio.currentTime = Math.max(0, audio.currentTime - (d.seekOffset || 10)); });
   h('seekforward', d => { audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + (d.seekOffset || 10)); });
@@ -1811,7 +1831,7 @@ function askReconnect(msg) {
 /* ---------- Ajustes ---------- */
 function openSettings() {
   $('#setFolder').value = store.get('folder', '') || CFG.MUSIC_FOLDER || '';
-  $('#setQuality').value = settings.quality; $('#setDlQuality').value = settings.dlQuality; $('#setCellSaver').checked = settings.cellSaver;
+  $('#setQuality').value = settings.quality; $('#setDlQuality').value = settings.dlQuality; $('#setCellSaver').checked = settings.cellSaver; $('#setHeadset').checked = settings.headset;
   { const n = netType(); $('#setNetInfo').textContent = 'Conexión actual: ' + (NET_NAMES[n] || 'no se pudo detectar') + (settings.cellSaver && n === 'cellular' ? ' · usando la versión más ligera' : ''); }
   $('#setAutoCovers').checked = autoCoversOn(); $('#setDJ').checked = DJ.on; $('#setDJFade').value = DJ.fade; $('#setDJFadeVal').textContent = DJ.fade + ' s'; $('#setDJEndless').checked = DJ.endless;
   const at = L.raw?.at ? new Date(L.raw.at).toLocaleString() : '—';
@@ -1833,6 +1853,7 @@ $('#setQuality').addEventListener('change', e => {
   buildLibrary(L.all); rerender(true); toast(settings.quality === 'max' ? 'Calidad máxima activada' : 'Ahorro de datos activado');
 });
 $('#setCellSaver').addEventListener('change', e => { settings.cellSaver = e.target.checked; store.set('cellSaver', settings.cellSaver); lastNetQ = playQ(); toast(settings.cellSaver ? (onCell() ? 'Ahorro en datos móviles activado (ya estás en datos)' : 'Ahorro en datos móviles activado') : 'Ahorro en datos móviles desactivado'); openSettings(); });
+$('#setHeadset').addEventListener('change', e => { settings.headset = e.target.checked; store.set('headset', settings.headset); toast(settings.headset ? 'Controles de audífonos activados' : 'Audífonos: 2 toques vuelve a pasar a la siguiente'); });
 $('#setAutoCovers').addEventListener('change', e => { store.set('autoCovers', e.target.checked); if (e.target.checked) { store.set('cvmiss', {}); onlineCovers(); toast('Buscando carátulas…'); } });
 $('#setDJ').addEventListener('change', e => { if (e.target.checked !== DJ.on) toggleDJ(); });
 $('#setDJFade').addEventListener('input', e => { DJ.fade = +e.target.value; store.set('djFade', DJ.fade); $('#setDJFadeVal').textContent = DJ.fade + ' s'; });
@@ -1987,8 +2008,12 @@ if (window.SonoraNative) {
     try {
       if (a === 'play') { if (audio.paused) togglePlay(); }
       else if (a === 'pause' || a === 'stop') { if (!audio.paused) togglePlay(); }
-      else if (a === 'nexttrack') next();
-      else if (a === 'previoustrack') prev();
+      else if (a === 'nexttrack') onNextCmd();
+      else if (a === 'previoustrack') onPrevCmd();
+      // Android: botones de los audífonos (la app nativa los distingue de la pantalla bloqueada)
+      else if (a === 'hs_next') settings.headset ? restartTrack() : next();
+      else if (a === 'hs_prev') settings.headset ? prevTrack() : prev();
+      else if (a === 'hs_toggle') togglePlay();
       else if (a === 'seekto' && isFinite(audio.duration)) { audio.currentTime = Math.max(0, Math.min(+arg || 0, audio.duration)); updatePositionState(); }
       else if (a === 'seekforward') audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + (+arg || 10));
       else if (a === 'seekbackward') audio.currentTime = Math.max(0, audio.currentTime - (+arg || 10));
