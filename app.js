@@ -95,21 +95,27 @@ const auth = {
   async request(prompt = '') {
     if (!CFG.GOOGLE_CLIENT_ID) throw new Error('Falta tu Client ID de Google en config.js (ver la guía).');
     await this.waitGis();
+    this.busy = true;
     return new Promise((res, rej) => {
+      const hint = store.get('authHint', '');
       const client = google.accounts.oauth2.initTokenClient({
-        client_id: CFG.GOOGLE_CLIENT_ID, scope: SCOPE, prompt,
+        client_id: CFG.GOOGLE_CLIENT_ID, scope: SCOPE, prompt, ...(hint ? { hint } : {}),
         callback: r => {
+          this.busy = false;
           if (r.error) return rej(new Error(r.error_description || r.error));
           this.token = r.access_token; this.exp = Date.now() + (r.expires_in || 3600) * 1000; this.save(); res(this.token);
+          // Recordar la cuenta para que Google no vuelva a preguntar cuál usar
+          if (!hint && !window.SonoraNative) fetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)', { headers: { Authorization: 'Bearer ' + this.token } }).then(x => x.json()).then(j => { if (j.user?.emailAddress) store.set('authHint', j.user.emailAddress); }).catch(() => { });
         },
-        error_callback: e => rej(new Error(e?.type === 'popup_closed' ? 'Se cerró la ventana de Google.' : (e?.message || 'No se pudo iniciar sesión.'))),
+        error_callback: e => { this.busy = false; rej(new Error(e?.type === 'popup_closed' ? 'Se cerró la ventana de Google.' : (e?.message || 'No se pudo iniciar sesión.'))); },
       });
       client.requestAccessToken({ prompt });
     });
   },
   logout() {
     try { if (this.token && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(this.token, () => { }); } catch { }
-    this.token = null; this.exp = 0; store.del('auth'); idb.del('kv', 'token').catch(() => { });
+    this.token = null; this.exp = 0; store.del('auth'); store.del('authHint'); idb.del('kv', 'token').catch(() => { });
+    caches.delete('sonora-tmp').catch(() => { });
   },
 };
 
@@ -147,12 +153,21 @@ let playlists = store.get('playlists', []);
 const savePlaylists = () => { store.set('playlists', playlists); renderSidebar(); };
 let downloaded = new Set(store.get('dl', []));
 const saveDl = () => store.set('dl', [...downloaded]);
-const settings = { quality: store.get('quality', 'max'), dlQuality: store.get('dlQuality', 'max') };
+const settings = { quality: store.get('quality', 'max'), dlQuality: store.get('dlQuality', 'max'), cellSaver: store.get('cellSaver', false) };
+/* ---------- Red: WiFi o datos móviles (para el ahorro de datos opcional) ---------- */
+function netType() {
+  try { const N = window.SonoraNative; if (N && typeof N.netType === 'function') { const t = N.netType(); if (t) return String(t); } } catch { }
+  const c = navigator.connection; return c && c.type ? c.type : 'unknown';
+}
+const onCell = () => netType() === 'cellular';
+// Calidad que se usa al reproducir: con el ahorro activado y en datos móviles, la versión más ligera
+const playQ = () => (settings.cellSaver && onCell()) ? 'saver' : settings.quality;
+const NET_NAMES = { wifi: 'WiFi', cellular: 'datos móviles', ethernet: 'cable de red', none: 'sin conexión' };
 const AUDIO_CACHE = 'sonora-audio-' + PID;
 const streamUrl = id => new URL('stream/' + id, location.href).href.split('#')[0].split('?')[0];
 const MIME = { flac: 'audio/flac', mp3: 'audio/mpeg', m4a: 'audio/mp4', mp4a: 'audio/mp4', alac: 'audio/mp4', aac: 'audio/aac', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', wav: 'audio/wav', aif: 'audio/aiff', aiff: 'audio/aiff', webm: 'audio/webm' };
 // iPhone (WebKit) exige el tipo de audio correcto; Drive a veces lo entrega como "application/octet-stream"
-const streamSrc = v => `stream/${v.id}` + (MIME[v.ext] ? `?t=${encodeURIComponent(MIME[v.ext])}` : '');
+const streamSrc = v => `stream/${v.id}?t=${encodeURIComponent(MIME[v.ext] || '')}` + (settings.cellSaver && onCell() ? '&p=0' : ''); // p=0: sin copia completa (ahorra datos)
 const typedBlob = (b, ext) => MIME[ext] && b.type !== MIME[ext] ? new Blob([b], { type: MIME[ext] }) : b;
 
 /* ---------- Carpeta de música: nombre o enlace de Drive ---------- */
@@ -597,7 +612,7 @@ function playList(list, start = 0, ctx = '') {
 
 // Devuelve la fuente de audio de una canción: descargada (sin internet) o en streaming desde Drive
 async function srcFor(t) {
-  const v = t.demo ? t : (dlVariant(t) || variantFor(t, settings.quality));
+  const v = t.demo ? t : (dlVariant(t) || variantFor(t, playQ()));
   let src;
   if (t.demo) src = await renderDemoAudio(t);
   else if (downloaded.has(v.id)) {
@@ -636,7 +651,7 @@ async function loadCurrent(autoplay, at = 0, hops = 0) {
     return;
   }
   P.cur = t; P.needsLoad = false; P.waitNet = false;
-  P.playing = t.demo ? t : (dlVariant(t) || variantFor(t, settings.quality));
+  P.playing = t.demo ? t : (dlVariant(t) || variantFor(t, playQ()));
   updateNowPlaying(); markPlaying(); renderQueue(); saveSession();
   if (P.ctx.startsWith('album:')) pushRecent(P.ctx.slice(6));
   try {
@@ -798,6 +813,8 @@ onA('error', () => {
   }
   if (!auth.valid()) { P.needsLoad = true; P.resumeAt = at; askReconnect('Tu sesión de Google expiró.'); return; }
   const code = audio.error?.code, t = P.cur, v = P.playing || t;
+  // Corte de red momentáneo: retomar en el mismo punto en vez de saltar la canción
+  if (t && code === 2 && (t.netRetry || 0) < 3) { t.netRetry = (t.netRetry || 0) + 1; toast('Reconectando…'); return loadCurrent(true, at); }
   // Plan B: si el streaming falla, descargar la canción completa y reproducirla desde la memoria
   if (t && !t.blobOnly && audio.src.includes('stream/')) {
     t.blobOnly = true; toast('Cargando la canción completa…');
@@ -810,7 +827,43 @@ onA('error', () => {
 // Al volver el internet, retoma donde se quedó
 window.addEventListener('online', () => { if (P.waitNet && P.needsLoad && P.cur) { P.waitNet = false; loadCurrent(true, P.resumeAt); } });
 
-const APP_VERSION = 'v9';
+const APP_VERSION = 'v10';
+/* ---------- Reproducción continua: vigilante de cortes y precarga de la siguiente canción ---------- */
+let wdT = -1, wdN = 0;
+setInterval(() => {
+  const t = P.cur;
+  if (!t || t.demo || audio.paused || DJ.mixing || !navigator.onLine || P.needsLoad) { wdN = 0; wdT = audio.currentTime; return; }
+  // Si la música quedó trabada 20 s (sin avanzar y sin que tú la pausaras), se reconecta sola en el mismo punto
+  if (Math.abs(audio.currentTime - wdT) < 0.01) { if (++wdN >= 4) { wdN = 0; console.warn('Sonora: reproducción trabada, reconectando'); loadCurrent(true, audio.currentTime); } }
+  else wdN = 0;
+  wdT = audio.currentTime;
+  // Precarga la siguiente canción para que suene sin cortes (no en datos móviles con el ahorro activado)
+  if (audio.currentTime > 15 && P.prefetched !== t && auth.valid() && !(settings.cellSaver && onCell())) {
+    P.prefetched = t;
+    const nx = P.queue[P.order[P.pos + 1]];
+    if (nx && !nx.demo && !isDl(nx)) swPost({ type: 'prefetch', id: variantFor(nx, playQ()).id });
+  }
+}, 5000);
+// Al cambiar entre WiFi y datos móviles, avisar si cambia la calidad (se aplica desde la próxima canción)
+let lastNetQ = null;
+function netChanged() {
+  if (!settings.cellSaver) return;
+  const q = playQ(); if (lastNetQ === null) { lastNetQ = q; return; }
+  if (q !== lastNetQ) { lastNetQ = q; toast(q === 'saver' ? 'Datos móviles: calidad más ligera desde la próxima canción' : 'WiFi: vuelve la calidad máxima desde la próxima canción'); }
+}
+window.addEventListener('sonoranet', netChanged);
+try { navigator.connection?.addEventListener('change', netChanged); } catch { }
+setInterval(netChanged, 15000);
+// PC: renovar el acceso a Google aprovechando un clic tuyo, antes de que venza (así no se corta la música)
+if (!window.SonoraNative) {
+  let lastRenew = 0;
+  const renew = () => {
+    if (mode !== 'drive' || !auth.token || auth.busy) return;
+    if (auth.exp - Date.now() > 20 * 60000 || Date.now() - lastRenew < 120000) return;
+    lastRenew = Date.now(); auth.request('').catch(() => { });
+  };
+  addEventListener('pointerdown', renew, true); addEventListener('keydown', renew, true);
+}
 // Diagnóstico del último error de reproducción (se ve en Ajustes)
 let lastPlayErr = '';
 async function playDiag(code, v) {
@@ -1758,7 +1811,8 @@ function askReconnect(msg) {
 /* ---------- Ajustes ---------- */
 function openSettings() {
   $('#setFolder').value = store.get('folder', '') || CFG.MUSIC_FOLDER || '';
-  $('#setQuality').value = settings.quality; $('#setDlQuality').value = settings.dlQuality;
+  $('#setQuality').value = settings.quality; $('#setDlQuality').value = settings.dlQuality; $('#setCellSaver').checked = settings.cellSaver;
+  { const n = netType(); $('#setNetInfo').textContent = 'Conexión actual: ' + (NET_NAMES[n] || 'no se pudo detectar') + (settings.cellSaver && n === 'cellular' ? ' · usando la versión más ligera' : ''); }
   $('#setAutoCovers').checked = autoCoversOn(); $('#setDJ').checked = DJ.on; $('#setDJFade').value = DJ.fade; $('#setDJFadeVal').textContent = DJ.fade + ' s'; $('#setDJEndless').checked = DJ.endless;
   const at = L.raw?.at ? new Date(L.raw.at).toLocaleString() : '—';
   $('#setInfo').innerHTML = (mode === 'demo' ? 'Modo demostración. Cierra sesión para conectar tu Google Drive.' : `${L.tracks.length} canciones · ${L.albums.size} álbumes · ${L.artists.size} artistas<br>Último escaneo: ${esc(at)}`) + `<br><span class="muted small">Versión ${APP_VERSION}${window.SonoraNative ? ' · app nativa' + (window.SonoraNative.platform === 'ios' ? ' iPhone' : '') : ''}${lastPlayErr ? '<br>Último error: ' + esc(lastPlayErr) : ''}</span>`;
@@ -1778,6 +1832,7 @@ $('#setQuality').addEventListener('change', e => {
   settings.quality = e.target.value; store.set('quality', settings.quality);
   buildLibrary(L.all); rerender(true); toast(settings.quality === 'max' ? 'Calidad máxima activada' : 'Ahorro de datos activado');
 });
+$('#setCellSaver').addEventListener('change', e => { settings.cellSaver = e.target.checked; store.set('cellSaver', settings.cellSaver); lastNetQ = playQ(); toast(settings.cellSaver ? (onCell() ? 'Ahorro en datos móviles activado (ya estás en datos)' : 'Ahorro en datos móviles activado') : 'Ahorro en datos móviles desactivado'); openSettings(); });
 $('#setAutoCovers').addEventListener('change', e => { store.set('autoCovers', e.target.checked); if (e.target.checked) { store.set('cvmiss', {}); onlineCovers(); toast('Buscando carátulas…'); } });
 $('#setDJ').addEventListener('change', e => { if (e.target.checked !== DJ.on) toggleDJ(); });
 $('#setDJFade').addEventListener('input', e => { DJ.fade = +e.target.value; store.set('djFade', DJ.fade); $('#setDJFadeVal').textContent = DJ.fade + ' s'; });

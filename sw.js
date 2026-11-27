@@ -3,7 +3,7 @@
 // 2) Transmite el audio desde Google Drive en su calidad original: añade tu token a cada
 //    petición y deja pasar las peticiones "Range" para que puedas adelantar la canción sin descargarla completa.
 
-const VERSION = 'sonora-v9';
+const VERSION = 'sonora-v10';
 const AUDIO_CACHE = 'sonora-audio'; // descargas: nunca se borra al actualizar
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'icons.js', 'tags.js', 'demo.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
@@ -18,7 +18,30 @@ self.addEventListener('activate', e => {
 });
 
 let TOKEN = null;
-self.addEventListener('message', e => { if (e.data?.type === 'token') TOKEN = e.data.token; });
+self.addEventListener('message', e => {
+  if (e.data?.type === 'token') TOKEN = e.data.token;
+  else if (e.data?.type === 'prefetch' && e.data.id) e.waitUntil(fullFetch(e.data.id));
+});
+
+/* Copia temporal de las canciones que suenan (y de la siguiente): la música sigue aunque se corte
+   la conexión o venza el acceso a Google, y el navegador no corta streams largos. */
+const TMP = 'sonora-tmp', TMP_MAX = 3, CHUNK = 4 * 1024 * 1024;
+const tmpKey = id => new URL('tmp/' + id, self.registration.scope).href;
+const inflight = new Map();
+function fullFetch(id) {
+  if (inflight.has(id)) return inflight.get(id);
+  const p = (async () => {
+    const c = await caches.open(TMP);
+    if (await c.match(tmpKey(id))) return;
+    const token = TOKEN || (TOKEN = await tokenFromDB()); if (!token) return;
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true`, { headers: { Authorization: 'Bearer ' + token } });
+    if (!r.ok) return;
+    await c.put(tmpKey(id), new Response(r.body, { headers: { 'Content-Type': r.headers.get('content-type') || 'audio/mpeg' } }));
+    const keys = await c.keys();
+    for (let i = 0; i < keys.length - TMP_MAX; i++) await c.delete(keys[i]);
+  })().catch(() => { }).finally(() => inflight.delete(id));
+  inflight.set(id, p); return p;
+}
 
 function tokenFromDB() {
   return new Promise(res => {
@@ -46,20 +69,27 @@ async function fromDownload(res, req) {
   return new Response(blob.slice(start, end + 1, type), { status: 206, headers: { 'Content-Type': type, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(end - start + 1), 'Accept-Ranges': 'bytes' } });
 }
 
-async function stream(id, req) {
+async function stream(id, req, e) {
   const u = new URL(req.url);
   const hit = await caches.match(u.origin + u.pathname); // busca en las descargas de cualquier perfil
   if (hit) return fromDownload(hit, req);
+  const tmp = await (await caches.open(TMP)).match(tmpKey(id));
+  if (tmp) return fromDownload(tmp, req);
+  if (e && u.searchParams.get('p') !== '0') e.waitUntil(fullFetch(id)); // guarda la canción completa en segundo plano
   const go = token => {
     const h = new Headers({ Authorization: 'Bearer ' + token });
-    const range = req.headers.get('range'); if (range) h.set('Range', range);
+    let range = req.headers.get('range');
+    // Pedir a Drive en trozos: cada respuesta termina rápido (los streams eternos los corta el navegador)
+    const m = range && /^bytes=(\d+)-$/.exec(range.trim());
+    if (m) range = `bytes=${m[1]}-${+m[1] + CHUNK - 1}`;
+    if (range) h.set('Range', range);
     return fetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media&supportsAllDrives=true`, { headers: h });
   };
   let token = TOKEN || (TOKEN = await tokenFromDB());
   let r = await go(token);
   if (r.status === 401) { const t2 = await tokenFromDB(); if (t2 && t2 !== token) { TOKEN = t2; r = await go(t2); } }
   // iPhone (WebKit) no reproduce si el tipo llega como "application/octet-stream": se corrige con la extensión
-  const want = u.searchParams.get('t');
+  const want = u.searchParams.get('t') || '';
   if (r.ok && want && !/^(audio|video)\//.test(r.headers.get('content-type') || '')) {
     const h = new Headers(r.headers); h.set('Content-Type', want);
     return new Response(r.body, { status: r.status, statusText: r.statusText, headers: h });
@@ -71,7 +101,7 @@ self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (url.origin !== location.origin || e.request.method !== 'GET') return;
   const m = url.pathname.match(/\/stream\/([\w-]+)$/);
-  if (m) { e.respondWith(stream(m[1], e.request)); return; }
+  if (m) { e.respondWith(stream(m[1], e.request, e)); return; }
   if (e.request.mode === 'navigate') {
     // La app abre al instante desde la copia guardada (aunque no haya internet o la red sea lenta)
     // y se actualiza en segundo plano para la próxima vez.

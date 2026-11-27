@@ -168,6 +168,11 @@
         </select>
         <small>La app nunca comprime el audio: reproduce el archivo tal cual está en tu Drive. Si tienes la misma canción en FLAC y MP3, aquí eliges cuál usar.</small>
       </label>
+      <div class="field">
+        <span>Datos móviles</span>
+        <label class="check"><input type="checkbox" id="setCellSaver"> Bajar la calidad cuando esté en datos móviles (en WiFi vuelve sola a la máxima)</label>
+        <small>Usa la versión más ligera de cada canción si la tienes duplicada en tu Drive (por ejemplo MP3 además de FLAC). <span id="setNetInfo"></span></small>
+      </div>
       <label class="field">
         <span>Calidad de descargas</span>
         <select id="setDlQuality">
